@@ -8465,21 +8465,26 @@ async function pollMessages() {
         // String() guards against a stray type/whitespace mismatch silently
         // letting a sender's own client treat its own message as "new".
         if (String(m.from_id) !== String(state.user.id)) {
-          // Don't mark unread if the user is already looking at this thread
-          // (covers the normal case, and the notification-tap case where
-          // openChat() marks it read then immediately calls pollMessages()
-          // to fetch the very message that triggered the notification).
-          const isActivelyViewing = state.screen === 'chat' && state.activeChatId === t.id;
-          existing.unread[state.user.id] = isActivelyViewing ? 0 : (existing.unread[state.user.id] || 0) + 1;
-          gotNew = true;
           // System messages (team chat created/updated, added/removed) have
-          // from_id null, which always fails the check above — they still
-          // belong in the thread and can still bump unread, but must never
-          // feed the generic "Message from X" push below: that produced a
-          // bogus "Message from Someone" to the whole thread for every
-          // system message, doubling up with the dedicated add/remove
-          // notifications this feature already sends where appropriate.
-          if (!m.is_system) {
+          // from_id null, which always fails the check above. They still
+          // belong in the thread (already pushed to existing.messages just
+          // above) so they show up in the chat's own history, and still
+          // trigger a re-render — but they're not something to notify about:
+          // no unread badge bump, and never fed into the generic "Message
+          // from X" push below (that produced a bogus "Message from Someone"
+          // to the whole thread for every system message, doubling up with
+          // the dedicated add/remove notifications this feature already
+          // sends where appropriate).
+          if (m.is_system) {
+            gotNew = true;
+          } else {
+            // Don't mark unread if the user is already looking at this thread
+            // (covers the normal case, and the notification-tap case where
+            // openChat() marks it read then immediately calls pollMessages()
+            // to fetch the very message that triggered the notification).
+            const isActivelyViewing = state.screen === 'chat' && state.activeChatId === t.id;
+            existing.unread[state.user.id] = isActivelyViewing ? 0 : (existing.unread[state.user.id] || 0) + 1;
+            gotNew = true;
             newMessages.push({ id: m.id, fromId: m.from_id, text: m.text || '', thread: existing });
           }
         }
