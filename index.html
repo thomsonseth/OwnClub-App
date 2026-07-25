@@ -4741,20 +4741,25 @@ function buildTeamSlotRow(idx) {
   const hasContent = slot.query.trim().length > 0;
   const isMatched = !!slot.userId;
   const escapedQuery = slot.query.replace(/"/g, '&quot;');
+  // Matched-to-a-registered-user slots get a tinted teal box; manually typed
+  // (or empty) slots stay neutral — makes it obvious at a glance which
+  // players were picked from the roster vs entered by hand.
+  const fieldBg = isMatched ? 'rgba(0,181,181,0.16)' : 'var(--surface)';
+  const fieldBorder = isMatched ? 'var(--teal)' : 'var(--border)';
 
   return `<div style="display:flex;flex-direction:column;gap:4px;">
     <div style="display:flex;gap:8px;align-items:center;">
       <div style="width:18px;font-size:12px;color:var(--text-dim);flex-shrink:0;text-align:right;">${idx + 1}</div>
       <div style="position:relative;flex:1;min-width:0;">
         <input type="text" id="team-slot-input-${idx}" value="${escapedQuery}" placeholder="Player name"
-          style="width:100%;box-sizing:border-box;background:var(--surface);border:1px solid ${isMatched ? 'var(--teal)' : 'var(--border)'};border-radius:10px;padding:10px 34px 10px 12px;color:var(--text);font-size:14px;"
+          style="width:100%;box-sizing:border-box;background:${fieldBg};border:1px solid ${fieldBorder};border-radius:10px;padding:10px 12px;color:var(--text);font-size:14px;"
           oninput="updateTeamSlotQuery(${idx}, this.value)"
           onfocus="renderTeamSlotSuggestions(${idx})"
           onblur="setTimeout(()=>blurTeamSlot(${idx}), 150)"/>
-        ${hasContent ? `<button onclick="clearTeamSlot(${idx})" title="Clear"
-          style="position:absolute;right:6px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--text-dim);font-size:15px;cursor:pointer;padding:4px;line-height:1;">✕</button>` : ''}
-        <div id="team-slot-suggestions-${idx}" style="display:none;position:absolute;top:calc(100% + 4px);left:0;right:0;background:var(--surface);border:1px solid var(--border);border-radius:10px;z-index:20;max-height:180px;overflow-y:auto;"></div>
+        <div id="team-slot-suggestions-${idx}" style="display:none;position:absolute;top:calc(100% + 4px);left:0;right:0;background:var(--surface);border:1px solid var(--border);border-radius:10px;z-index:20;max-height:152px;overflow-y:auto;-webkit-overflow-scrolling:touch;"></div>
       </div>
+      ${hasContent ? `<button onclick="clearTeamSlot(${idx})"
+        style="flex-shrink:0;background:none;border:1px solid var(--border);color:var(--text-dim);border-radius:10px;padding:9px 12px;font-size:12px;font-weight:600;cursor:pointer;">Remove</button>` : ''}
       ${hasContent ? `<select class="role-select" style="flex-shrink:0;" onchange="setTeamSlotRole(${idx}, this.value)">
         <option value="">No role</option>
         <option value="Captain" ${slot.captainRole === 'Captain' ? 'selected' : ''}>Captain</option>
@@ -4793,16 +4798,23 @@ window.renderTeamSlotSuggestions = (idx) => {
   const box = document.getElementById('team-slot-suggestions-' + idx);
   if (!box) return;
   const slot = state.teamSlots[idx];
-  const q = slot.query.trim().toLowerCase();
-  const players = state.users.filter(u => u.role === 'Player' || u.role === 'Captain' || u.role === 'Administrator');
-  const usedIds = new Set(state.teamSlots.filter((s, i) => i !== idx && s.userId).map(s => s.userId));
-  const matches = players.filter(p => !usedIds.has(p.id) && (!q || `${p.firstName} ${p.lastName}`.toLowerCase().includes(q))).slice(0, 8);
-  if (matches.length === 0) {
+  // Already matched to a registered player — nothing to suggest against
+  // itself. Re-showing the list here (it'd just match the same person) is
+  // exactly what looked like a stray box popping up over the name. Use
+  // Remove to clear the slot first if they want to pick someone else.
+  if (slot.userId) {
     box.style.display = 'none';
     box.innerHTML = '';
     return;
   }
-  box.innerHTML = matches.map(p =>
+  const q = slot.query.trim().toLowerCase();
+  const players = state.users.filter(u => u.role === 'Player' || u.role === 'Captain' || u.role === 'Administrator');
+  const usedIds = new Set(state.teamSlots.filter((s, i) => i !== idx && s.userId).map(s => s.userId));
+  const matches = players.filter(p => !usedIds.has(p.id) && (!q || `${p.firstName} ${p.lastName}`.toLowerCase().includes(q)));
+  // Pinned hint (not a suggestion, not clickable) so it's clear typing a
+  // name that isn't on the list is fine — it'll be added as a guest.
+  const hint = `<div style="padding:8px 12px;font-size:11px;font-style:italic;color:var(--text-dim);border-bottom:1px solid var(--border);">Enter manually — type a name if they're not on this list</div>`;
+  box.innerHTML = hint + matches.map(p =>
     `<div onmousedown="selectTeamSlotUser(${idx}, '${p.id}')" style="padding:10px 12px;font-size:14px;color:var(--text);cursor:pointer;">${p.firstName} ${p.lastName}</div>`
   ).join('');
   box.style.display = 'block';
