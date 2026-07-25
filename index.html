@@ -3202,12 +3202,10 @@ async function syncGradeTeamChat(ev) {
     const existing = Array.isArray(existingRows) && existingRows[0] ? existingRows[0] : null;
 
     if (!existing) {
-      // The 11+ threshold (guests included in the count) only gates whether
-      // a chat gets CREATED in the first place. Once one exists for this
-      // grade, every publish after that keeps it in sync regardless of
-      // count — see below — so players dropped from the selection actually
-      // leave the chat even if the team falls below (or all the way to) 11.
-      if (ev.team.length < 11 || rosterIds.length === 0) return;
+      // No minimum team size — create as soon as anyone with an account is
+      // selected (e.g. 8 confirmed on selection night, still chasing the
+      // rest). Guards only against there being literally nobody to add yet.
+      if (rosterIds.length === 0) return;
       const threadRows = await sb.insert('threads', { is_group: true, name: title, participants: rosterIds });
       const threadId = Array.isArray(threadRows) && threadRows[0]?.id ? threadRows[0].id : null;
       if (!threadId) return;
