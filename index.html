@@ -4126,10 +4126,12 @@ function buildEventDetail() {
       ${ev.team && ev.team.length > 0 ? `
         <div class="card">
           ${ev.team.map(p => {
+            // One uniform list — only Captain/Wicketkeeper should stand out,
+            // no distinction shown here between a registered player and a
+            // manually-entered guest.
             const roleTag = p.captainRole ? `<span style="color:var(--teal);font-size:12px;">(${p.captainRole})</span>` : '';
-            if (p.isGuest) return `<div style="font-size:14px;color:var(--text);padding:4px 0;">${p.name} <span style="color:var(--text-dim);font-size:11px;">(Guest)</span> ${roleTag}</div>`;
-            const u = state.users.find(u=>u.id===p.id);
-            return u ? `<div style="font-size:14px;color:var(--text);padding:4px 0;">${u.firstName} ${u.lastName} ${roleTag}</div>` : '';
+            const name = p.isGuest ? p.name : (() => { const u = state.users.find(u => u.id === p.id); return u ? `${u.firstName} ${u.lastName}` : null; })();
+            return name ? `<div style="font-size:14px;color:var(--text);padding:4px 0;">${name} ${roleTag}</div>` : '';
           }).join('')}
         </div>
         ${isAdmin ? `<button class="btn-secondary" style="margin-top:10px" onclick="openSelectPlayers('${ev.id}')">Select players</button>` : ''}
@@ -4747,32 +4749,40 @@ function buildTeamSlotRow(idx) {
   const fieldBg = isMatched ? 'rgba(0,181,181,0.16)' : 'var(--surface)';
   const fieldBorder = isMatched ? 'var(--teal)' : 'var(--border)';
 
+  const placeholder = idx < 11 ? 'Select player' : 'Select player (optional)';
+  const isCaptain = slot.captainRole === 'Captain';
+  const isKeeper = slot.captainRole === 'Wicketkeeper';
+
   return `<div style="display:flex;flex-direction:column;gap:4px;">
-    <div style="display:flex;gap:8px;align-items:center;">
-      <div style="width:18px;font-size:12px;color:var(--text-dim);flex-shrink:0;text-align:right;">${idx + 1}</div>
+    <div style="display:flex;gap:6px;align-items:center;">
+      <div style="width:16px;font-size:12px;color:var(--text-dim);flex-shrink:0;text-align:right;">${idx + 1}</div>
       <div style="position:relative;flex:1;min-width:0;">
-        <input type="text" id="team-slot-input-${idx}" value="${escapedQuery}" placeholder="Player name"
-          style="width:100%;box-sizing:border-box;background:${fieldBg};border:1px solid ${fieldBorder};border-radius:10px;padding:10px 12px;color:var(--text);font-size:14px;"
+        <input type="text" id="team-slot-input-${idx}" value="${escapedQuery}" placeholder="${placeholder}"
+          style="width:100%;box-sizing:border-box;background:${fieldBg};border:1px solid ${fieldBorder};border-radius:10px;padding:9px 10px;color:var(--text);font-size:13px;text-overflow:ellipsis;"
           oninput="updateTeamSlotQuery(${idx}, this.value)"
           onfocus="renderTeamSlotSuggestions(${idx})"
           onblur="setTimeout(()=>blurTeamSlot(${idx}), 150)"/>
         <div id="team-slot-suggestions-${idx}" style="display:none;position:absolute;top:calc(100% + 4px);left:0;right:0;background:var(--surface);border:1px solid var(--border);border-radius:10px;z-index:20;max-height:152px;overflow-y:auto;-webkit-overflow-scrolling:touch;"></div>
       </div>
       ${hasContent ? `<button onclick="clearTeamSlot(${idx})"
-        style="flex-shrink:0;background:none;border:1px solid var(--border);color:var(--text-dim);border-radius:10px;padding:9px 12px;font-size:12px;font-weight:600;cursor:pointer;">Remove</button>` : ''}
-      ${hasContent ? `<select class="role-select" style="flex-shrink:0;" onchange="setTeamSlotRole(${idx}, this.value)">
-        <option value="">No role</option>
-        <option value="Captain" ${slot.captainRole === 'Captain' ? 'selected' : ''}>Captain</option>
-        <option value="Wicketkeeper" ${slot.captainRole === 'Wicketkeeper' ? 'selected' : ''}>Wicketkeeper</option>
-      </select>` : ''}
+        style="flex-shrink:0;background:none;border:1px solid var(--border);color:var(--text-dim);border-radius:8px;padding:8px 9px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;">Remove</button>
+      <button onclick="toggleTeamSlotRole(${idx}, 'Captain')" title="Captain"
+        style="flex-shrink:0;width:26px;height:32px;border-radius:8px;border:1px solid ${isCaptain ? 'var(--teal)' : 'var(--border)'};background:${isCaptain ? 'var(--teal)' : 'none'};color:${isCaptain ? '#000' : 'var(--text-dim)'};font-size:11px;font-weight:700;cursor:pointer;padding:0;">C</button>
+      <button onclick="toggleTeamSlotRole(${idx}, 'Wicketkeeper')" title="Wicketkeeper"
+        style="flex-shrink:0;width:30px;height:32px;border-radius:8px;border:1px solid ${isKeeper ? 'var(--teal)' : 'var(--border)'};background:${isKeeper ? 'var(--teal)' : 'none'};color:${isKeeper ? '#000' : 'var(--text-dim)'};font-size:11px;font-weight:700;cursor:pointer;padding:0;">WK</button>` : ''}
     </div>
-    ${hasContent && !isMatched ? `<div style="font-size:11px;color:var(--text-dim);padding-left:26px;">No app account — will be added as a guest</div>` : ''}
+    ${hasContent && !isMatched ? `<div style="font-size:11px;color:var(--text-dim);padding-left:22px;">No app account — will be added as a guest</div>` : ''}
   </div>`;
 }
 
 function buildTeamSelect() {
   const count = state.teamSlots.filter(s => s.query.trim()).length;
-  const rows = state.teamSlots.map((_, idx) => buildTeamSlotRow(idx)).join('');
+  const divider = `<div style="display:flex;align-items:center;gap:8px;margin:2px 0;">
+    <div style="flex:1;height:1px;background:var(--border);"></div>
+    <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.5px;">Additional players</div>
+    <div style="flex:1;height:1px;background:var(--border);"></div>
+  </div>`;
+  const rows = state.teamSlots.map((_, idx) => (idx === 11 ? divider : '') + buildTeamSlotRow(idx)).join('');
 
   return `<div class="screen">
     ${buildTopBanner({ title: 'Select Team', showBack: true })}
@@ -4844,9 +4854,10 @@ window.clearTeamSlot = (idx) => {
   render(true);
 };
 
-window.setTeamSlotRole = (idx, role) => {
+window.toggleTeamSlotRole = (idx, role) => {
   const slot = state.teamSlots[idx];
-  if (slot) slot.captainRole = role;
+  if (!slot) return;
+  slot.captainRole = slot.captainRole === role ? '' : role; // tapping the active one clears it
   render(true);
 };
 
