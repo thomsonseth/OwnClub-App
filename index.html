@@ -1634,6 +1634,25 @@
         allowLocalhostAsSecureOrigin: true,
         serviceWorkerPath: '/OneSignalSDKWorker.js',
       });
+
+      // Route notification taps in-app directly, instead of relying on the
+      // notification's target URL actually navigating the page. Whether
+      // OneSignal focuses an already-open tab or opens a fresh one, this
+      // fires either way — so route from the notification's own data rather
+      // than waiting on window.location.hash to reflect it, which isn't
+      // dependable for an already-open tab.
+      OneSignal.Notifications.addEventListener('click', (event) => {
+        try {
+          const url = event?.notification?.launchURL || event?.notification?.url || event?.result?.url || '';
+          const hashIdx = url.indexOf('#');
+          if (hashIdx < 0) return;
+          const hash = url.slice(hashIdx + 1);
+          // handleDeepLink is a top-level function declaration in the main
+          // app script, so it lands on window once that script has run —
+          // guard in case a click somehow fires before it has.
+          if (typeof window.handleDeepLink === 'function') window.handleDeepLink(hash);
+        } catch (e) {}
+      });
     });
   </script>
 </head>
@@ -3205,10 +3224,14 @@ function isUserTyping() {
 }
 
 function render(force = false) {
-  // Never rebuild the DOM while the user is typing, or mid-gesture on the
-  // date/time wheel picker — a background poll landing mid-scroll would
-  // otherwise wipe out the picker's scroll position under the user's thumb.
-  if (!force && (isUserTyping() || state.modal?.type === 'datetime')) return;
+  // Never rebuild the DOM while the user is typing elsewhere in the app, or
+  // mid-gesture on the date/time wheel picker — a background poll landing
+  // mid-scroll would otherwise wipe out the picker's scroll position under
+  // the user's thumb. The chat screen is exempt: its input syncs to state on
+  // every keystroke (so a rebuild there is safe), and it needs to be able to
+  // rebuild anyway — that's how an incoming message/reaction actually shows
+  // up while you're sitting in the conversation looking at it.
+  if (!force && ((isUserTyping() && state.screen !== 'chat') || state.modal?.type === 'datetime')) return;
 
   // Save scroll position of any scrollable area before rebuild
   const scrollEl = document.querySelector('.screen-scroll');
@@ -4773,9 +4796,10 @@ function buildTeamSelect() {
         ${guestRows}
         <div style="display:flex;gap:8px;padding-top:4px;">
           <input type="text" id="guest-player-name" placeholder="Manually enter player name"
-            style="flex:1;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 12px;color:var(--text);font-size:14px;"
+            style="flex:1;min-width:0;box-sizing:border-box;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 12px;color:var(--text);font-size:14px;"
             onkeydown="if(event.key==='Enter'){event.preventDefault();addGuestPlayer();}"/>
-          <button class="btn-secondary" onclick="addGuestPlayer()" style="flex-shrink:0;">Add</button>
+          <button onclick="addGuestPlayer()"
+            style="flex-shrink:0;width:auto;background:var(--surface);color:var(--text);border:none;border-radius:10px;padding:0 18px;font-size:14px;font-weight:600;cursor:pointer;">Add</button>
         </div>
         <button class="btn-primary" onclick="publishTeam()">Publish selection</button>
       </div>
@@ -8309,7 +8333,13 @@ async function pollMessages() {
       }
     }
 
-    if (gotNew && !isUserTyping()) render();
+    // isUserTyping() exists to stop a background poll from rebuilding a form
+    // out from under someone mid-edit elsewhere in the app. The chat input
+    // no longer needs that protection — it syncs to state on every keystroke
+    // now — so exempt the chat screen; otherwise an incoming message or
+    // reaction silently never renders while your cursor sits in the message
+    // box, which is the normal state the whole time you're actively chatting.
+    if (gotNew && (!isUserTyping() || state.screen === 'chat')) render();
   } catch(e) { console.log('Message poll error:', e); }
 }
 
@@ -8341,8 +8371,14 @@ function stopPolling() {
 
 // ── DEEP LINK HANDLER ─────────────────────────────────────────────────────
 // Reads URL hash params set by push notifications e.g. #screen=eventdetail&id=abc
-function handleDeepLink() {
-  const hash = window.location.hash.slice(1); // remove leading #
+// hashOverride lets a caller route directly from a hash string it already
+// has (e.g. OneSignal's notification click handler, parsing the target url
+// out of the notification itself) without going through the address bar at
+// all — needed because a notification click doesn't reliably navigate an
+// already-open tab's actual URL, so waiting on window.location.hash to
+// reflect it isn't dependable.
+function handleDeepLink(hashOverride) {
+  const hash = hashOverride ?? window.location.hash.slice(1); // remove leading #
   if (!hash || !state.user) return;
   const params = Object.fromEntries(new URLSearchParams(hash));
   const screen = params.screen;
@@ -8361,8 +8397,9 @@ function handleDeepLink() {
   } else if (screen === 'chat' && id) {
     openChat(id);
   }
-  // Clear the hash so it doesn't re-navigate on refresh
-  window.history.replaceState(null, '', window.location.pathname);
+  // Clear the hash so it doesn't re-navigate on refresh (only relevant when
+  // we actually came from the address bar's own hash).
+  if (hashOverride === undefined) window.history.replaceState(null, '', window.location.pathname);
   render();
 }
 
