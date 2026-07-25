@@ -3236,6 +3236,14 @@ async function syncGradeTeamChat(ev) {
     toRemove.forEach(id => { const i = participants.indexOf(id); if (i >= 0) participants.splice(i, 1); });
     toAdd.forEach(id => { if (!participants.includes(id)) participants.push(id); });
 
+    if (participants.length === 0) {
+      // Nobody left — delete rather than leave an empty chat sitting around.
+      // Cascades to its messages and the grade_chats mapping, so the next
+      // time anyone's selected for this grade a fresh chat gets created.
+      await sb.delete('threads', { id: existing.thread_id });
+      return;
+    }
+
     const titleChanged = thread.name !== title;
     await sb.update('threads', { name: title, participants }, { id: existing.thread_id });
     // sb.update()'s match-object query builder doesn't URL-encode values, and
@@ -8353,13 +8361,33 @@ async function pollMessages() {
     const myThreads = threads.filter(t =>
       Array.isArray(t.participants) && t.participants.includes(state.user.id)
     );
-    if (myThreads.length === 0) return;
+
+    let gotNew = false;
+
+    // The server only returns threads we're still a participant of
+    // (RLS-scoped) — if a thread we already know about locally isn't in that
+    // set anymore, we were removed from it (e.g. by the grade-chat auto-sync
+    // dropping us when the selection changed) and it should disappear from
+    // our list too, not linger until a manual reload. Pending (unsent,
+    // local-only) threads never exist server-side by design — leave those.
+    const myThreadIds = new Set(myThreads.map(t => t.id));
+    for (let i = state.messages.length - 1; i >= 0; i--) {
+      const t = state.messages[i];
+      if (!t.isPending && !myThreadIds.has(t.id)) {
+        state.messages.splice(i, 1);
+        gotNew = true;
+      }
+    }
+
+    if (myThreads.length === 0) {
+      if (gotNew && !isUserTyping()) render();
+      return;
+    }
 
     const threadIds = myThreads.map(t => `"${t.id}"`).join(',');
     const msgs = await sb.select('messages', `thread_id=in.(${threadIds})&order=created_at.asc`);
     if (!Array.isArray(msgs)) return;
 
-    let gotNew = false;
     const newMessages = []; // collect every new message this poll cycle, not just the first
     const newReactions = []; // collect every newly-added reaction this poll cycle
 
