@@ -1434,20 +1434,61 @@
   .reaction-chip.mine  { border-color: var(--accent); background: rgba(26,58,143,0.12); }
   .reaction-chip-count { font-size: 11px; color: var(--text-muted); }
 
-  .emoji-picker {
+  /* Long-press message menu — Messenger-style: a reaction pill row above a
+     rounded list of actions (Reply, Copy). One floating panel anchored to
+     the bubble, rather than a full-screen dimmed backdrop with the bubble
+     and menu independently floating — same visual language, simpler and
+     more robust to build/maintain. */
+  .msg-action-menu {
     position: absolute;
+    z-index: 25;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: 210px;
+  }
+  .msg-reaction-pill {
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 16px;
-    padding: 8px 10px;
+    border-radius: 999px;
+    padding: 8px 12px;
     display: flex;
     gap: 8px;
-    z-index: 20;
+    justify-content: space-between;
     box-shadow: 0 4px 20px rgba(0,0,0,0.4);
     font-size: 20px;
   }
-  .emoji-picker span { cursor: pointer; transition: transform 0.1s; }
-  .emoji-picker span:hover { transform: scale(1.3); }
+  .msg-reaction-pill span { cursor: pointer; transition: transform 0.1s; }
+  .msg-reaction-pill span:hover { transform: scale(1.3); }
+  .msg-menu-list {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    overflow: hidden;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+  }
+  .msg-menu-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 16px;
+    font-size: 15px;
+    color: var(--text);
+    cursor: pointer;
+  }
+  .msg-menu-item:not(:first-child) { border-top: 1px solid var(--border); }
+  .msg-menu-item svg { width: 18px; height: 18px; color: var(--text-muted); flex-shrink: 0; }
+
+  .reply-quote {
+    border-left: 3px solid var(--accent);
+    padding: 4px 0 4px 8px;
+    margin-bottom: 4px;
+    font-size: 12px;
+    color: var(--text-muted);
+    cursor: pointer;
+  }
+  .reply-quote strong { color: var(--accent); }
 
   .chat-search-bar {
     display: flex;
@@ -1717,6 +1758,7 @@ const state = {
   modal: null,               // { type, ... }
   newMessage: '',
   chatInput: '',
+  replyingTo: null, // { id } of the message being replied to in the open chat
   instagramPosts: [],       // cached Instagram feed posts
   facebookPosts: [],        // cached Facebook feed posts
   instagramLoading: false,  // feed loading state
@@ -2099,6 +2141,7 @@ async function loadAppData(silent = false) {
               image: m.image_url || null,
               system: m.is_system || false,
               reactions: m.reactions || {},
+              replyToId: m.reply_to_id || null,
               ts: new Date(m.created_at).getTime(),
             }))
           : [];
@@ -3028,10 +3071,12 @@ function sendChatMessage() {
   if (thread && state.user) {
     const text = state.chatInput.trim();
     const tempId = 'temp_' + Date.now();
+    const replyToId = state.replyingTo?.id || null;
     const newMsg = {
       id: tempId,
       from: state.user.id,
       text,
+      replyToId,
       ts: Date.now(),
     };
     thread.messages.push(newMsg);
@@ -3063,6 +3108,7 @@ function sendChatMessage() {
         from_id: state.user.id,
         text,
         is_system: false,
+        reply_to_id: replyToId,
       });
       const realId = Array.isArray(rows) && rows[0]?.id ? rows[0].id : null;
       if (realId) {
@@ -3090,6 +3136,7 @@ function sendChatMessage() {
     })();
 
     state.chatInput = '';
+    state.replyingTo = null;
     render();
     // render() rebuilds the input as a brand new DOM node, so it loses focus.
     // Re-focus it explicitly — otherwise, especially on Android, the
@@ -5065,19 +5112,38 @@ function buildChat() {
       </span>`;
     }).join('');
 
-    // Emoji picker (shown when this message is selected) — Copy sits in the
-    // same long-press popup as the reactions, same interaction Messenger
-    // uses, rather than binding to a plain tap (which would fire constantly
-    // while just scrolling/reading and fight with the long-press-to-react
-    // gesture already on the bubble).
+    // Long-press menu (shown when this message is selected) — reaction pill
+    // row above a Reply/Copy action list, same visual language as Messenger's
+    // long-press menu: a floating panel anchored to the bubble rather than a
+    // full-screen dimmed backdrop with independently-floating pieces.
     const showPicker = state.reactionPickerMsgId === msg.id;
     const EMOJIS = ['👍','❤️','😂','😮','😢','🙏'];
     const pickerHtml = showPicker ? `
-      <div class="emoji-picker" style="${isMine ? 'right:0;' : 'left:0;'} bottom:calc(100% + 4px);">
-        ${EMOJIS.map(e => `<span onclick="toggleReaction('${msg.id}','${e}'); closeReactionPicker()">${e}</span>`).join('')}
-        ${!msg.image ? `<span onclick="copyMessageText('${msg.id}')" title="Copy"
-          style="font-size:16px;border-left:1px solid var(--border);padding-left:8px;margin-left:2px;display:flex;align-items:center;color:var(--text-muted);">📋</span>` : ''}
+      <div class="msg-action-menu" style="${isMine ? 'right:0;' : 'left:0;'} bottom:calc(100% + 4px);">
+        <div class="msg-reaction-pill">
+          ${EMOJIS.map(e => `<span onclick="toggleReaction('${msg.id}','${e}'); closeReactionPicker()">${e}</span>`).join('')}
+        </div>
+        <div class="msg-menu-list">
+          <div class="msg-menu-item" onclick="startReply('${msg.id}')">
+            Reply
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 00-4-4H4"/></svg>
+          </div>
+          ${!msg.image ? `<div class="msg-menu-item" onclick="copyMessageText('${msg.id}')">
+            Copy
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>
+          </div>` : ''}
+        </div>
       </div>` : '';
+
+    // Quoted preview of the original message, shown above the bubble when
+    // this message is a reply. Tapping it jumps to the original.
+    const repliedMsg = msg.replyToId ? thread.messages.find(m => m.id === msg.replyToId) : null;
+    const replyQuoteHtml = !msg.replyToId ? '' : (() => {
+      if (!repliedMsg) return `<div class="reply-quote">Original message unavailable</div>`;
+      const rSenderName = repliedMsg.from === state.user.id ? 'You' : (state.users.find(u => u.id === repliedMsg.from)?.firstName || 'Someone');
+      const rSnippet = repliedMsg.image ? '📷 Photo' : (repliedMsg.text || '').substring(0, 60);
+      return `<div class="reply-quote" onclick="scrollToMessage('${repliedMsg.id}')"><strong>${rSenderName}</strong>: ${rSnippet}</div>`;
+    })();
 
     // Bubble content — image or text
     const bubbleContent = msg.image
@@ -5086,7 +5152,7 @@ function buildChat() {
 
     return `
       ${showDate ? `<div class="chat-date-divider">${msgDate}</div>` : ''}
-      <div class="chat-bubble-wrap ${isMine ? 'mine' : 'theirs'}" style="position:relative;"
+      <div class="chat-bubble-wrap ${isMine ? 'mine' : 'theirs'}" id="msg-${msg.id}" style="position:relative;"
         ontouchstart="startLongPress('${msg.id}')" ontouchend="cancelLongPress()" ontouchmove="cancelLongPress()"
         onmousedown="startLongPress('${msg.id}')" onmouseup="cancelLongPress()" onmouseleave="cancelLongPress()"
         oncontextmenu="event.preventDefault();return false;">
@@ -5095,6 +5161,7 @@ function buildChat() {
           ${senderName}
           <div style="position:relative;">
             ${pickerHtml}
+            ${replyQuoteHtml}
             ${bubbleContent}
           </div>
           <div class="chat-bubble-time" style="text-align:${isMine ? 'right' : 'left'};">${formatMsgTimestamp(msg.ts)}</div>
@@ -5115,6 +5182,21 @@ function buildChat() {
       <button onclick="closeChatSearch()" style="background:none;border:none;color:var(--text-muted);font-size:14px;cursor:pointer;">✕</button>
     </div>` : '';
 
+  // "Replying to" banner above the input, cancellable — cleared automatically
+  // once the reply is actually sent (see sendChatMessage).
+  const replyingToMsg = state.replyingTo ? thread.messages.find(m => m.id === state.replyingTo.id) : null;
+  const replyBanner = replyingToMsg ? (() => {
+    const rSenderName = replyingToMsg.from === state.user.id ? 'You' : (state.users.find(u => u.id === replyingToMsg.from)?.firstName || 'Someone');
+    const rSnippet = replyingToMsg.image ? '📷 Photo' : (replyingToMsg.text || '').substring(0, 80);
+    return `<div style="display:flex;align-items:center;gap:8px;padding:8px 16px;background:var(--surface);border-top:1px solid var(--border);">
+      <div style="flex:1;min-width:0;border-left:3px solid var(--accent);padding-left:8px;">
+        <div style="font-size:12px;font-weight:600;color:var(--accent);">Replying to ${rSenderName}</div>
+        <div style="font-size:13px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${rSnippet}</div>
+      </div>
+      <button onclick="cancelReply()" style="background:none;border:none;color:var(--text-dim);font-size:18px;cursor:pointer;padding:4px;">✕</button>
+    </div>`;
+  })() : '';
+
   return `<div class="screen" style="overflow:hidden;">
     <div class="chat-header">
       <button class="chat-header-back" onclick="navigate('messages')">‹ Back</button>
@@ -5134,6 +5216,7 @@ function buildChat() {
       <div class="chat-messages" id="chat-messages-container">
         ${bubbles || '<div style="text-align:center;color:var(--text-dim);font-size:14px;margin-top:30px;padding:20px;">Start the conversation! 👋</div>'}
       </div>
+      ${replyBanner}
       <div class="chat-input-row">
         <label class="chat-attach-btn" title="Share photo">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
@@ -6788,6 +6871,28 @@ window.copyMessageText = (msgId) => {
   render();
 };
 
+window.startReply = (msgId) => {
+  state.replyingTo = { id: msgId };
+  state.reactionPickerMsgId = null;
+  render();
+  const inputEl = document.getElementById('chat-input-field');
+  if (inputEl) inputEl.focus();
+};
+
+window.cancelReply = () => {
+  state.replyingTo = null;
+  render();
+};
+
+window.scrollToMessage = (msgId) => {
+  const el = document.getElementById('msg-' + msgId);
+  if (!el) return;
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  el.style.transition = 'background-color 0.3s';
+  el.style.backgroundColor = 'rgba(0,181,181,0.15)';
+  setTimeout(() => { el.style.backgroundColor = ''; }, 900);
+};
+
 window.toggleReaction = (msgId, emoji) => {
   const thread = state.messages.find(m => m.id === state.activeChatId);
   if (!thread) return;
@@ -6994,6 +7099,7 @@ window.deleteThreadForMe = (id) => {
 window.openChat = (id) => {
   state.activeChatId = id;
   state.chatInput = '';
+  state.replyingTo = null;
   state.chatSearch = '';
   state.chatSearchActive = false;
   state.reactionPickerMsgId = null;
@@ -8466,6 +8572,7 @@ async function pollMessages() {
           image: m.image_url || null,
           system: m.is_system || false,
           reactions: m.reactions || {},
+          replyToId: m.reply_to_id || null,
           ts: new Date(m.created_at).getTime(),
         };
         existing.messages.push(newMsg);
