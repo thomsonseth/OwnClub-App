@@ -8472,7 +8472,16 @@ async function pollMessages() {
           const isActivelyViewing = state.screen === 'chat' && state.activeChatId === t.id;
           existing.unread[state.user.id] = isActivelyViewing ? 0 : (existing.unread[state.user.id] || 0) + 1;
           gotNew = true;
-          newMessages.push({ id: m.id, fromId: m.from_id, text: m.text || '', thread: existing });
+          // System messages (team chat created/updated, added/removed) have
+          // from_id null, which always fails the check above — they still
+          // belong in the thread and can still bump unread, but must never
+          // feed the generic "Message from X" push below: that produced a
+          // bogus "Message from Someone" to the whole thread for every
+          // system message, doubling up with the dedicated add/remove
+          // notifications this feature already sends where appropriate.
+          if (!m.is_system) {
+            newMessages.push({ id: m.id, fromId: m.from_id, text: m.text || '', thread: existing });
+          }
         }
       });
     });
