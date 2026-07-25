@@ -3194,13 +3194,7 @@ function shortTeamName(name) {
 async function syncGradeTeamChat(ev) {
   try {
     if (!ev.grade) return; // no grade to key a rolling chat off — skip entirely
-    // Threshold counts everyone selected — guests included — since that's
-    // what "a full team" means; guests just can't actually be added to the
-    // chat below (no app account to add).
-    if (ev.team.length < 11) return;
     const rosterIds = ev.team.filter(p => !p.isGuest).map(p => p.id);
-    if (rosterIds.length === 0) return; // nobody selected has an account — nothing to create/update
-
     const gradeKey = [ev.grade, ev.gender].filter(Boolean).join('|');
     const title = [ev.grade, shortTeamName(ev.homeTeam), 'V', shortTeamName(ev.awayTeam)].filter(Boolean).join(' ');
 
@@ -3208,6 +3202,12 @@ async function syncGradeTeamChat(ev) {
     const existing = Array.isArray(existingRows) && existingRows[0] ? existingRows[0] : null;
 
     if (!existing) {
+      // The 11+ threshold (guests included in the count) only gates whether
+      // a chat gets CREATED in the first place. Once one exists for this
+      // grade, every publish after that keeps it in sync regardless of
+      // count — see below — so players dropped from the selection actually
+      // leave the chat even if the team falls below (or all the way to) 11.
+      if (ev.team.length < 11 || rosterIds.length === 0) return;
       const threadRows = await sb.insert('threads', { is_group: true, name: title, participants: rosterIds });
       const threadId = Array.isArray(threadRows) && threadRows[0]?.id ? threadRows[0].id : null;
       if (!threadId) return;
