@@ -1434,19 +1434,9 @@
   .reaction-chip.mine  { border-color: var(--accent); background: rgba(26,58,143,0.12); }
   .reaction-chip-count { font-size: 11px; color: var(--text-muted); }
 
-  /* Long-press message menu — Messenger-style: a reaction pill row above a
-     rounded list of actions (Reply, Copy). One floating panel anchored to
-     the bubble, rather than a full-screen dimmed backdrop with the bubble
-     and menu independently floating — same visual language, simpler and
-     more robust to build/maintain. */
-  .msg-action-menu {
-    position: absolute;
-    z-index: 25;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    width: 210px;
-  }
+  /* Long-press message menu — Messenger-style: reactions float above the
+     bubble, the Reply/Copy action list floats below it (positioning is set
+     inline per-instance since each floats independently off the bubble). */
   .msg-reaction-pill {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -5112,27 +5102,30 @@ function buildChat() {
       </span>`;
     }).join('');
 
-    // Long-press menu (shown when this message is selected) — reaction pill
-    // row above a Reply/Copy action list, same visual language as Messenger's
-    // long-press menu: a floating panel anchored to the bubble rather than a
-    // full-screen dimmed backdrop with independently-floating pieces.
+    // Long-press menu (shown when this message is selected) — reactions
+    // float above the bubble, the Reply/Copy action list floats below it,
+    // matching Messenger's layout (reactions on top, message in the middle,
+    // actions underneath) rather than stacking both pieces into one panel.
+    // A full-screen backdrop behind both (lower z-index, so it never blocks
+    // clicks on the menu itself) closes the menu on an outside tap without
+    // requiring the user to pick an option.
     const showPicker = state.reactionPickerMsgId === msg.id;
     const EMOJIS = ['👍','❤️','😂','😮','😢','🙏'];
-    const pickerHtml = showPicker ? `
-      <div class="msg-action-menu" style="${isMine ? 'right:0;' : 'left:0;'} bottom:calc(100% + 4px);">
-        <div class="msg-reaction-pill">
-          ${EMOJIS.map(e => `<span onclick="toggleReaction('${msg.id}','${e}'); closeReactionPicker()">${e}</span>`).join('')}
+    const backdropHtml = showPicker ? `<div onclick="closeReactionPicker()" style="position:fixed;inset:0;z-index:24;"></div>` : '';
+    const reactionPillHtml = showPicker ? `
+      <div class="msg-reaction-pill" style="position:absolute;z-index:25;${isMine ? 'right:0;' : 'left:0;'} bottom:calc(100% + 4px);">
+        ${EMOJIS.map(e => `<span onclick="toggleReaction('${msg.id}','${e}'); closeReactionPicker()">${e}</span>`).join('')}
+      </div>` : '';
+    const actionMenuHtml = showPicker ? `
+      <div class="msg-menu-list" style="position:absolute;z-index:25;width:180px;${isMine ? 'right:0;' : 'left:0;'} top:calc(100% + 4px);">
+        <div class="msg-menu-item" onclick="startReply('${msg.id}')">
+          Reply
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 00-4-4H4"/></svg>
         </div>
-        <div class="msg-menu-list">
-          <div class="msg-menu-item" onclick="startReply('${msg.id}')">
-            Reply
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 00-4-4H4"/></svg>
-          </div>
-          ${!msg.image ? `<div class="msg-menu-item" onclick="copyMessageText('${msg.id}')">
-            Copy
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>
-          </div>` : ''}
-        </div>
+        ${!msg.image ? `<div class="msg-menu-item" onclick="copyMessageText('${msg.id}')">
+          Copy
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>
+        </div>` : ''}
       </div>` : '';
 
     // Quoted preview of the original message, shown above the bubble when
@@ -5160,9 +5153,11 @@ function buildChat() {
         <div class="bubble-col ${isMine ? 'bubble-col-mine' : 'bubble-col-theirs'}">
           ${senderName}
           <div style="position:relative;">
-            ${pickerHtml}
+            ${backdropHtml}
+            ${reactionPillHtml}
             ${replyQuoteHtml}
             ${bubbleContent}
+            ${actionMenuHtml}
           </div>
           <div class="chat-bubble-time" style="text-align:${isMine ? 'right' : 'left'};">${formatMsgTimestamp(msg.ts)}</div>
           ${reactionChips ? `<div class="reaction-bar">${reactionChips}</div>` : ''}
