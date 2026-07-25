@@ -1295,23 +1295,6 @@
   .webview-redirect-text strong { color: var(--teal); }
 
 
-  .role-select {
-    background-color: var(--surface2);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    color: var(--text);
-    font-size: 12px;
-    padding: 6px 26px 6px 8px;
-    outline: none;
-    appearance: none;
-    -webkit-appearance: none;
-    -moz-appearance: none;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23888888' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: right 6px center;
-    background-size: 14px;
-  }
-
   .selected-count-badge {
     background: var(--teal);
     color: #000;
@@ -1334,11 +1317,17 @@
   @keyframes spin { to { transform: rotate(360deg); } }
 
   /* ── SELECT (native) ── */
+  /* Every native <select> gets a deliberately prominent dropdown chevron —
+     the previous one (16px, muted #888) was easy to mistake for a free-text
+     field at a glance. Teal + a visible border makes "this is a picker, not
+     a text field" unambiguous, and applies uniformly to every select in the
+     app (role picker, event format/grade, etc.) rather than needing this
+     called out per-screen. */
   select {
     background-color: var(--surface);
-    border: none;
+    border: 1px solid var(--accent);
     border-radius: 12px;
-    padding: 14px 40px 14px 16px;
+    padding: 14px 44px 14px 16px;
     font-size: 15px;
     color: var(--text);
     outline: none;
@@ -1346,10 +1335,10 @@
     appearance: none;
     -webkit-appearance: none;
     -moz-appearance: none;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23888888' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2300b5b5' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
     background-repeat: no-repeat;
     background-position: right 14px center;
-    background-size: 16px;
+    background-size: 20px;
   }
 
   select option { background: #1c1c1c; }
@@ -5076,12 +5065,18 @@ function buildChat() {
       </span>`;
     }).join('');
 
-    // Emoji picker (shown when this message is selected)
+    // Emoji picker (shown when this message is selected) — Copy sits in the
+    // same long-press popup as the reactions, same interaction Messenger
+    // uses, rather than binding to a plain tap (which would fire constantly
+    // while just scrolling/reading and fight with the long-press-to-react
+    // gesture already on the bubble).
     const showPicker = state.reactionPickerMsgId === msg.id;
     const EMOJIS = ['👍','❤️','😂','😮','😢','🙏'];
     const pickerHtml = showPicker ? `
       <div class="emoji-picker" style="${isMine ? 'right:0;' : 'left:0;'} bottom:calc(100% + 4px);">
         ${EMOJIS.map(e => `<span onclick="toggleReaction('${msg.id}','${e}'); closeReactionPicker()">${e}</span>`).join('')}
+        ${!msg.image ? `<span onclick="copyMessageText('${msg.id}')" title="Copy"
+          style="font-size:16px;border-left:1px solid var(--border);padding-left:8px;margin-left:2px;display:flex;align-items:center;color:var(--text-muted);">📋</span>` : ''}
       </div>` : '';
 
     // Bubble content — image or text
@@ -5311,9 +5306,11 @@ function buildNewConversation() {
         ` : ''}
         <div style="font-size:13px;font-weight:600;color:var(--text-muted);padding:4px 0;">Club members</div>
         ${contacts || '<div class="empty-state">No members found</div>'}
-        ${canStart ? `<button class="btn-primary" onclick="startConversation()">${btnLabel}</button>` : ''}
       </div>
     </div>
+    ${canStart ? `<div style="padding:12px 16px 24px;border-top:1px solid var(--border);background:var(--bg);">
+      <button class="btn-primary" onclick="startConversation()">${btnLabel}</button>
+    </div>` : ''}
   </div>`;
 }
 
@@ -6777,6 +6774,17 @@ window.showReactionPicker = (msgId) => {
 
 window.closeReactionPicker = () => {
   state.reactionPickerMsgId = null;
+  render();
+};
+
+window.copyMessageText = (msgId) => {
+  const thread = state.messages.find(t => t.id === state.activeChatId);
+  const msg = thread?.messages.find(m => m.id === msgId);
+  state.reactionPickerMsgId = null;
+  if (!msg || !msg.text) { render(); return; }
+  navigator.clipboard.writeText(msg.text)
+    .then(() => showToast('Copied to clipboard'))
+    .catch(() => showToast('Could not copy — try selecting the text manually'));
   render();
 };
 
@@ -8589,6 +8597,10 @@ function handleDeepLink(hashOverride) {
     state.prevScreen = 'home';
   } else if (screen === 'chat' && id) {
     openChat(id);
+  } else if (screen === 'userlist') {
+    state.activeTab = 'menu';
+    navigate('userlist');
+    state.prevScreen = 'menu';
   }
   // Clear the hash so it doesn't re-navigate on refresh (only relevant when
   // we actually came from the address bar's own hash).
