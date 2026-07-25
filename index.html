@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=overlays-content"/>
-<title>ClubApp – Laurimar Power Cricket Club</title>
+<title>OwnClub App – Laurimar Power Cricket Club</title>
 <link rel="manifest" href="/manifest.json"/>
 <meta name="mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-capable" content="yes"/>
@@ -1699,6 +1699,7 @@ const state = {
   user: null,                // logged in user
   toggles: { social: true, announcements: true, teamSelection: true, training: true },
   events: [],
+  newEventIds: new Set(), // event ids added since the user last opened the Events tab — drives the footer badge
   announcements: [],
   messages: [],
   users: [],
@@ -2059,8 +2060,12 @@ async function loadAppData(silent = false) {
         const ev = state.events.find(e => e.id === t.event_id);
         if (ev) {
           if (!ev.team) ev.team = [];
-          const u = state.users.find(u => u.id === t.user_id);
-          if (u) ev.team.push({ id: t.user_id, captainRole: t.role || '' });
+          if (t.guest_name) {
+            ev.team.push({ id: 'guest_' + t.id, name: t.guest_name, captainRole: t.role || '', isGuest: true });
+          } else {
+            const u = state.users.find(u => u.id === t.user_id);
+            if (u) ev.team.push({ id: t.user_id, captainRole: t.role || '' });
+          }
         }
       });
     }
@@ -2788,7 +2793,19 @@ function isUpcoming(dateStr) {
   return new Date(dateStr + 'T23:59:59') >= new Date();
 }
 
+// A brand-new, never-sent-to conversation only exists locally (see
+// startConversation()/sendChatMessage()) — leaving it without sending
+// should make it vanish, same as it never showing up for anyone else.
+// 'chatinfo' is excluded since that's a sub-view of the same conversation,
+// not actually leaving it.
+function cleanupEmptyPendingChat(nextScreen) {
+  if (state.screen !== 'chat' || nextScreen === 'chatinfo') return;
+  const idx = state.messages.findIndex(t => t.id === state.activeChatId && t.isPending && t.messages.length === 0);
+  if (idx >= 0) state.messages.splice(idx, 1);
+}
+
 function navigate(screen, extra = {}) {
+  cleanupEmptyPendingChat(screen);
   state.prevScreen = state.screen;
   Object.assign(state, extra);
   state.screen = screen;
@@ -2823,15 +2840,18 @@ window.goToEventsTab = function(tab) {
 function goBack() {
   if (state.screen === 'createevent') state.editingEventId = null;
   const back = state.prevScreen || 'home';
+  cleanupEmptyPendingChat(back);
   state.screen = back;
   state.prevScreen = null;
   render();
 }
 
 function setTab(tab) {
-  state.activeTab = tab;
   const tabScreens = { home: 'home', events: 'events', messages: 'messages', menu: 'menu' };
+  cleanupEmptyPendingChat(tabScreens[tab]);
+  state.activeTab = tab;
   state.screen = tabScreens[tab];
+  if (tab === 'events') state.newEventIds.clear();
   render();
 }
 
@@ -3024,13 +3044,31 @@ function sendChatMessage() {
       if (pid !== state.user.id) thread.unread[pid] = (thread.unread[pid] || 0) + 1;
     });
 
+    const wasPendingId = thread.id;
+
     // Persist to Supabase — replace temp ID with real UUID when returned
-    sb.insert('messages', {
-      thread_id: thread.id,
-      from_id: state.user.id,
-      text,
-      is_system: false,
-    }).then(async rows => {
+    (async () => {
+      // A brand-new conversation isn't persisted until its first message is
+      // actually sent — create the real threads row now, on first send, and
+      // swap the thread's local (pending_...) id for the real one.
+      if (thread.isPending) {
+        const threadRows = await sb.insert('threads', {
+          is_group: thread.isGroup,
+          name: thread.name,
+          participants: thread.participants,
+        });
+        const realThreadId = Array.isArray(threadRows) && threadRows[0]?.id ? threadRows[0].id : thread.id;
+        delete thread.isPending;
+        thread.id = realThreadId;
+        if (state.activeChatId === wasPendingId) state.activeChatId = realThreadId;
+      }
+
+      const rows = await sb.insert('messages', {
+        thread_id: thread.id,
+        from_id: state.user.id,
+        text,
+        is_system: false,
+      });
       const realId = Array.isArray(rows) && rows[0]?.id ? rows[0].id : null;
       if (realId) {
         // Replace temp ID with real Supabase UUID so poller won't duplicate it
@@ -3054,10 +3092,16 @@ function sendChatMessage() {
           recipients,
         );
       }
-    });
+    })();
 
     state.chatInput = '';
     render();
+    // render() rebuilds the input as a brand new DOM node, so it loses focus.
+    // Re-focus it explicitly — otherwise, especially on Android, the
+    // ambiguous focus/keyboard state right after sending reads as "did that
+    // actually send?" and invites the user to hit Enter again.
+    const inputEl = document.getElementById('chat-input-field');
+    if (inputEl) inputEl.focus();
     setTimeout(() => {
       const el = document.getElementById('chat-messages-container');
       if (el) el.scrollTop = el.scrollHeight;
@@ -3100,14 +3144,17 @@ function publishTeamSelection() {
     (async () => {
       await sb.delete('team_selections', { event_id: ev.id });
       if (ev.team.length > 0) {
-        await sb.insert('team_selections', ev.team.map(p => ({
-          event_id: ev.id, user_id: p.id, role: p.captainRole || null,
-        })));
+        await sb.insert('team_selections', ev.team.map(p => (
+          p.isGuest
+            ? { event_id: ev.id, user_id: null, guest_name: p.name, role: p.captainRole || null }
+            : { event_id: ev.id, user_id: p.id, role: p.captainRole || null }
+        )));
       }
     })();
 
     // Targeted push — only to the players just selected, not the whole club.
-    const selectedIds = ev.team.map(p => p.id);
+    // Guests have no app account/OneSignal subscription, so they're excluded.
+    const selectedIds = ev.team.filter(p => !p.isGuest).map(p => p.id);
     if (selectedIds.length > 0) {
       const descriptor = buildMatchDescriptor(ev, true); // possessive: "Mens"/"Womens"
       sendPushNotificationToUsers(
@@ -3167,6 +3214,14 @@ function render(force = false) {
   const scrollEl = document.querySelector('.screen-scroll');
   const savedScroll = scrollEl ? scrollEl.scrollTop : 0;
 
+  // Chat messages: remember whether the user was already at (or near) the
+  // bottom before rebuilding, plus their exact position either way.
+  const prevChatEl = document.querySelector('.chat-messages');
+  const wasNearChatBottom = prevChatEl
+    ? (prevChatEl.scrollHeight - prevChatEl.scrollTop - prevChatEl.clientHeight < 80)
+    : true; // no prior chat element (fresh open) — treat as "should land at bottom"
+  const savedChatScroll = prevChatEl ? prevChatEl.scrollTop : 0;
+
   const app = document.getElementById('app');
   app.innerHTML = buildScreen();
   attachEvents();
@@ -3177,9 +3232,12 @@ function render(force = false) {
     if (newScrollEl) newScrollEl.scrollTop = savedScroll;
   }
 
-  // Scroll chat to bottom
+  // Chat: only snap to the bottom if the user was already there (or this is
+  // a fresh open of the chat) — otherwise keep them where they were reading.
+  // A background poll picking up a new message/reaction shouldn't yank
+  // someone back down while they've scrolled up to read earlier messages.
   const chatEl = document.querySelector('.chat-messages');
-  if (chatEl) chatEl.scrollTop = chatEl.scrollHeight;
+  if (chatEl) chatEl.scrollTop = wasNearChatBottom ? chatEl.scrollHeight : savedChatScroll;
 
   handleKeyboardResize();
 }
@@ -3258,9 +3316,13 @@ function buildBottomNav() {
   const msgBadge = totalUnread > 0
     ? `<span style="position:absolute;top:2px;right:18px;background:var(--accent);color:#000;font-size:10px;font-weight:700;min-width:16px;height:16px;border-radius:8px;display:flex;align-items:center;justify-content:center;padding:0 3px;">${totalUnread > 99 ? '99+' : totalUnread}</span>`
     : '';
+  const newEventsCount = state.newEventIds.size;
+  const eventsBadge = newEventsCount > 0
+    ? `<span style="position:absolute;top:2px;right:18px;background:var(--accent);color:#000;font-size:10px;font-weight:700;min-width:16px;height:16px;border-radius:8px;display:flex;align-items:center;justify-content:center;padding:0 3px;">${newEventsCount > 99 ? '99+' : newEventsCount}</span>`
+    : '';
   return `<div class="bottom-nav">
     <button class="nav-tab ${t==='home'?'active':''}" onclick="setTab('home')">${icons.home}<span>Home</span></button>
-    <button class="nav-tab ${t==='events'?'active':''}" onclick="setTab('events')">${icons.events}<span>Events</span></button>
+    <button class="nav-tab ${t==='events'?'active':''}" onclick="setTab('events')" style="position:relative;">${icons.events}${eventsBadge}<span>Events</span></button>
     <button class="nav-tab ${t==='messages'?'active':''}" onclick="setTab('messages')" style="position:relative;">${icons.messages}${msgBadge}<span>Messages</span></button>
     <button class="nav-tab ${t==='menu'?'active':''}" onclick="setTab('menu')">${icons.menu}<span>Menu</span></button>
   </div>`;
@@ -3290,7 +3352,7 @@ function buildSplash() {
       <div class="splash-actions">
         <button class="btn-primary" onclick="navigate('login')">Login</button>
         <button class="btn-secondary" onclick="navigate('signup')">Create account</button>
-        <p class="powered-by">CLUB APP &nbsp;·&nbsp; Powered by <span>${CLUB_CONFIG.poweredBy}</span></p>
+        <p class="powered-by">OWNCLUB APP &nbsp;·&nbsp; Powered by <span>${CLUB_CONFIG.poweredBy}</span></p>
       </div>
     </div>
   </div>`;
@@ -3481,7 +3543,7 @@ function buildEmailConfirm() {
         ` : `
         <div style="background:var(--surface);border-radius:16px;padding:20px;display:flex;flex-direction:column;gap:12px;text-align:center;">
           <div style="font-size:15px;color:var(--text);line-height:1.6;">
-            1. Look for an email from <strong style="color:var(--accent)">Own Club</strong><br/>
+            1. Look for an email from <strong style="color:var(--accent)">OwnClub App</strong><br/>
             2. Tap the confirmation link<br/>
             3. Come back here and tap the button below
           </div>
@@ -4058,7 +4120,12 @@ function buildEventDetail() {
       <div class="section-title" style="font-size:16px;">Team</div>
       ${ev.team && ev.team.length > 0 ? `
         <div class="card">
-          ${ev.team.map(p => { const u = state.users.find(u=>u.id===p.id); return u ? `<div style="font-size:14px;color:var(--text);padding:4px 0;">${u.firstName} ${u.lastName} ${p.captainRole?`<span style="color:var(--teal);font-size:12px;">(${p.captainRole})</span>`:''}</div>` : ''; }).join('')}
+          ${ev.team.map(p => {
+            const roleTag = p.captainRole ? `<span style="color:var(--teal);font-size:12px;">(${p.captainRole})</span>` : '';
+            if (p.isGuest) return `<div style="font-size:14px;color:var(--text);padding:4px 0;">${p.name} <span style="color:var(--text-dim);font-size:11px;">(Guest)</span> ${roleTag}</div>`;
+            const u = state.users.find(u=>u.id===p.id);
+            return u ? `<div style="font-size:14px;color:var(--text);padding:4px 0;">${u.firstName} ${u.lastName} ${roleTag}</div>` : '';
+          }).join('')}
         </div>
         ${isAdmin ? `<button class="btn-secondary" style="margin-top:10px" onclick="openSelectPlayers('${ev.id}')">Select players</button>` : ''}
       ` : `
@@ -4679,16 +4746,55 @@ function buildTeamSelect() {
     </div>`;
   }).join('');
 
+  // Guest players — added by typed name, for someone selected who doesn't
+  // have the app / an app profile. Not saved anywhere beyond this event.
+  const guests = state.selectedPlayers.filter(p => p.isGuest);
+  const guestRows = guests.map(p => `<div class="player-select-row">
+      <div class="player-checkbox checked" onclick="removeGuestPlayer('${p.id}')">
+        <span style="color:#000">${icons.check}</span>
+      </div>
+      <div class="player-name-text">${p.name} <span style="color:var(--text-dim);font-size:11px;">(Guest)</span></div>
+      <div style="display:flex;flex-direction:column;gap:3px;">
+        <label style="font-size:10px;color:var(--text-dim);font-weight:600;text-transform:uppercase;letter-spacing:0.3px;">Role</label>
+        <select class="role-select" onchange="setPlayerRole('${p.id}', this.value)">
+          <option value="">No role</option>
+          <option value="Captain" ${p.captainRole==='Captain'?'selected':''}>Captain</option>
+          <option value="Wicketkeeper" ${p.captainRole==='Wicketkeeper'?'selected':''}>Wicketkeeper</option>
+        </select>
+      </div>
+    </div>`).join('');
+
   return `<div class="screen">
     ${buildTopBanner({ title: 'Select Team', showBack: true })}
     <div class="screen-scroll">
       <div style="padding:16px;display:flex;flex-direction:column;gap:12px;">
         <div class="selected-count-badge">${count} selected</div>
         ${rows}
+        ${guestRows}
+        <div style="display:flex;gap:8px;padding-top:4px;">
+          <input type="text" id="guest-player-name" placeholder="Manually enter player name"
+            style="flex:1;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 12px;color:var(--text);font-size:14px;"
+            onkeydown="if(event.key==='Enter'){event.preventDefault();addGuestPlayer();}"/>
+          <button class="btn-secondary" onclick="addGuestPlayer()" style="flex-shrink:0;">Add</button>
+        </div>
         <button class="btn-primary" onclick="publishTeam()">Publish selection</button>
       </div>
     </div>
   </div>`;
+}
+
+function addGuestPlayer() {
+  const input = document.getElementById('guest-player-name');
+  const name = (input?.value || '').trim();
+  if (!name) return;
+  state.selectedPlayers.push({ id: 'guest_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7), name, captainRole: '', isGuest: true });
+  render();
+}
+
+function removeGuestPlayer(id) {
+  const idx = state.selectedPlayers.findIndex(p => p.id === id);
+  if (idx >= 0) state.selectedPlayers.splice(idx, 1);
+  render();
 }
 
 // ── MESSAGES LIST ─────────────────────────────────────────────────────────
@@ -4871,7 +4977,7 @@ function buildChat() {
           <input type="file" accept="image/*" style="display:none;" onchange="sendImageMessage(event)"/>
         </label>
         <textarea class="chat-input" id="chat-input-field" placeholder="Message…" rows="1"
-          onkeydown="chatKeyDown(event)" oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,100)+'px'"
+          onkeydown="chatKeyDown(event)" oninput="state.chatInput=this.value;this.style.height='auto';this.style.height=Math.min(this.scrollHeight,100)+'px'"
         >${state.chatInput}</textarea>
         <button class="chat-send-btn" onclick="doSendChat()">${icons.send}</button>
       </div>
@@ -5246,7 +5352,7 @@ function buildSettings() {
           </div>
         </div>
         <div>
-          <div class="section-title">ClubApp feedback</div>
+          <div class="section-title">OwnClub App feedback</div>
           <div style="display:flex;flex-direction:column;gap:12px;">
             <div class="input-group"><label class="input-label">Name</label><input class="input-field" id="fb-name" placeholder="Your name" value="${f.name}"/></div>
             <div class="input-group"><label class="input-label">Email</label><input class="input-field" id="fb-email" type="email" placeholder="Your email" value="${f.email}"/></div>
@@ -6505,11 +6611,13 @@ window.toggleReaction = (msgId, emoji) => {
   if (!msg.reactions) msg.reactions = {};
   if (!msg.reactions[emoji]) msg.reactions[emoji] = [];
   const idx = msg.reactions[emoji].indexOf(state.user.id);
+  let added = false;
   if (idx >= 0) {
     msg.reactions[emoji].splice(idx, 1);
     if (msg.reactions[emoji].length === 0) delete msg.reactions[emoji];
   } else {
     msg.reactions[emoji].push(state.user.id);
+    added = true;
   }
   state.reactionPickerMsgId = null;
   render();
@@ -6518,6 +6626,25 @@ window.toggleReaction = (msgId, emoji) => {
   // flight) — skip persisting until the real id lands, same guard used elsewhere.
   if (!String(msgId).startsWith('temp_')) {
     sb.update('messages', { reactions: msg.reactions }, { id: msgId });
+
+    // Notify the message's original sender — not on removal, and not when
+    // reacting to your own message. Gated by the same claimReminder key
+    // pollMessages() uses for the same event, so whichever path notices
+    // first (this immediate send, or another participant's poller) is the
+    // only one that actually sends.
+    if (added && msg.from !== 'system' && String(msg.from) !== String(state.user.id)) {
+      (async () => {
+        if (await claimReminder(`reaction_${msgId}_${emoji}_${state.user.id}`)) {
+          const reactorName = state.user.nickname || state.user.firstName;
+          sendPushNotificationToUsers(
+            `${reactorName} reacted ${emoji}`,
+            msg.text ? msg.text.substring(0, 200) : 'to your message',
+            `${CLUB_CONFIG.appUrl}/#screen=chat&id=${thread.id}`,
+            [msg.from],
+          );
+        }
+      })();
+    }
   }
 };
 
@@ -6687,10 +6814,15 @@ window.openChat = (id) => {
   const thread = state.messages.find(m => m.id === id);
   if (thread && state.user) thread.unread[state.user.id] = 0;
   render();
-  setTimeout(() => {
+  const scrollToBottom = () => {
     const el = document.getElementById('chat-messages-container');
     if (el) el.scrollTop = el.scrollHeight;
-  }, 50);
+  };
+  setTimeout(scrollToBottom, 50);
+  // Fetch this thread's messages right away rather than waiting for the next
+  // 5s poll tick — covers arriving here via a notification tap, where the
+  // message that triggered the notification may not be loaded yet.
+  pollMessages().then(() => setTimeout(scrollToBottom, 50));
 };
 
 window.handleNewMsg = () => handleNewMessage();
@@ -6726,22 +6858,19 @@ window.startConversation = async () => {
 
   const groupName = isGroup ? (state.newGroupName || 'Group Chat') : null;
 
-  // Persist thread to Supabase first to get real UUID
-  const rows = await sb.insert('threads', {
-    is_group: isGroup,
-    name: groupName,
-    participants,
-  });
-
-  const realId = Array.isArray(rows) && rows[0]?.id ? rows[0].id : ('m' + Date.now());
-
+  // Not persisted to Supabase yet — a conversation only becomes real (and
+  // visible to anyone, including other participants and other devices of
+  // your own account) once the first message is actually sent. Opening a
+  // chat and backing out without sending leaves no trace, same as Messenger.
+  // sendChatMessage() creates the real threads row on first send.
   const newThread = {
-    id: realId,
+    id: 'pending_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
     isGroup,
     participants,
     name: groupName,
     messages: [],
     unread: Object.fromEntries(participants.map(id => [id, 0])),
+    isPending: true,
   };
   state.messages.unshift(newThread);
   state.selectedContacts = [];
@@ -6756,6 +6885,11 @@ window.doSendChat = () => {
 };
 
 window.chatKeyDown = (e) => {
+  // Android IME composition (predictive text, Samsung/Gboard) can fire a
+  // keydown for Enter while still composing — treating that as submit sends
+  // a stale/partial value and leaves the composition in a confused state.
+  // Let it finish; the user's next real Enter press will submit.
+  if (e.isComposing) return;
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     state.chatInput = e.target.value;
@@ -7691,6 +7825,11 @@ function handleKeyboardResize() {
   _kbResizeTimer = setTimeout(applyKeyboardResize, 80);
 }
 
+// Tracks scroll-into-view state across applyKeyboardResize() calls so a
+// field is only scrolled once per keyboard-open session (see below).
+let _kbOpen = false;
+let _kbScrolledEl = null;
+
 function applyKeyboardResize() {
   const frame = document.getElementById('phone-frame');
   if (!frame || !window.visualViewport) return;
@@ -7708,12 +7847,23 @@ function applyKeyboardResize() {
     // ourselves, scoped to whichever scrollable container actually holds
     // the field, replaces that native behavior everywhere, not just chat.
     const active = document.activeElement;
-    if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) {
+    const isField = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA');
+    // Only scroll once per keyboard-open session (or when focus moves to a
+    // different field while it's already open) — iOS fires repeated
+    // visualViewport 'resize' events while typing as the QuickType
+    // suggestion bar changes height per keystroke, and re-running a smooth
+    // scrollIntoView on every one of those ticks made the chat input
+    // visibly bob up and down for as long as the user kept typing.
+    if (isField && (!_kbOpen || _kbScrolledEl !== active)) {
       requestAnimationFrame(() => active.scrollIntoView({ block: 'center', behavior: 'smooth' }));
+      _kbScrolledEl = active;
     }
+    _kbOpen = true;
   } else {
     frame.style.height = '';
     if (navEl) navEl.style.display = '';
+    _kbOpen = false;
+    _kbScrolledEl = null;
   }
 }
 
@@ -7865,8 +8015,12 @@ async function pollAll() {
         evRows.forEach(r => {
           const mapped = rowToEvent(r);
           if (!existingIds.has(r.id)) {
-            // New event — add it
+            // New event — add it. Only badge it as "new" if the user isn't
+            // already sitting on the Events tab (mirrors the chat-thread
+            // unread logic: no point flagging something as unseen when
+            // they're already looking at the list it'll show up in).
             state.events.push(mapped);
+            if (state.activeTab !== 'events') state.newEventIds.add(r.id);
             changed = true;
           } else {
             // Existing event — check for changes
@@ -8007,6 +8161,16 @@ async function pollAll() {
   }
 
   // ── Poll messages every 5s ────────────────────────────────────────────
+  await pollMessages();
+}
+
+// Fetches + merges messages for all of the user's threads. Normally run
+// every 5s from pollAll(), but also called immediately (not on the 5s
+// cadence) whenever we need fresh data right away — opening a chat via a
+// notification tap, or resuming from the background — instead of waiting
+// for the next tick.
+async function pollMessages() {
+  if (!state.user || !sb._token) return;
   try {
     const threads = await sb.select('threads', 'order=created_at.asc');
     if (!Array.isArray(threads)) return;
@@ -8022,6 +8186,7 @@ async function pollAll() {
 
     let gotNew = false;
     const newMessages = []; // collect every new message this poll cycle, not just the first
+    const newReactions = []; // collect every newly-added reaction this poll cycle
 
     myThreads.forEach(t => {
       const threadMsgs = msgs.filter(m => m.thread_id === t.id);
@@ -8061,9 +8226,24 @@ async function pollAll() {
           // so they'd otherwise never be picked up here).
           const local = existing.messages.find(lm => lm.id === m.id);
           const freshReactions = m.reactions || {};
-          if (local && JSON.stringify(local.reactions || {}) !== JSON.stringify(freshReactions)) {
+          const oldReactions = local?.reactions || {};
+          if (local && JSON.stringify(oldReactions) !== JSON.stringify(freshReactions)) {
             local.reactions = freshReactions;
             if (state.screen === 'chat' && state.activeChatId === t.id) gotNew = true;
+
+            // Collect newly-added reactions (not removals, not on your own
+            // message) for the message owner's push notification below.
+            if (local.from !== 'system') {
+              Object.keys(freshReactions).forEach(em => {
+                const newUsers = freshReactions[em] || [];
+                const oldUsers = oldReactions[em] || [];
+                newUsers.forEach(uid => {
+                  if (!oldUsers.includes(uid) && String(uid) !== String(local.from)) {
+                    newReactions.push({ msgId: m.id, emoji: em, reactorId: uid, ownerId: local.from, text: local.text, thread: existing });
+                  }
+                });
+              });
+            }
           }
           return;
         }
@@ -8082,35 +8262,54 @@ async function pollAll() {
         // String() guards against a stray type/whitespace mismatch silently
         // letting a sender's own client treat its own message as "new".
         if (String(m.from_id) !== String(state.user.id)) {
-          existing.unread[state.user.id] = (existing.unread[state.user.id] || 0) + 1;
+          // Don't mark unread if the user is already looking at this thread
+          // (covers the normal case, and the notification-tap case where
+          // openChat() marks it read then immediately calls pollMessages()
+          // to fetch the very message that triggered the notification).
+          const isActivelyViewing = state.screen === 'chat' && state.activeChatId === t.id;
+          existing.unread[state.user.id] = isActivelyViewing ? 0 : (existing.unread[state.user.id] || 0) + 1;
           gotNew = true;
           newMessages.push({ id: m.id, fromId: m.from_id, text: m.text || '', thread: existing });
         }
       });
     });
 
-    if (gotNew) {
-      // Every participant's client detects the same new message independently.
-      // claimReminder ensures only one of them actually sends the push, no
-      // matter how many clients are polling this thread at once.
-      for (const msg of newMessages) {
-        if (await claimReminder(`msg_${msg.id}`)) {
-          const sender = state.users.find(u => u.id === msg.fromId);
-          const senderName = sender ? (sender.nickname || sender.firstName) : 'Someone';
-          const recipients = msg.thread.participants.filter(pid => pid !== msg.fromId);
-          if (recipients.length > 0) {
-            sendPushNotificationToUsers(
-              `Message from ${senderName}`,
-              msg.text.substring(0, 200),
-              `${CLUB_CONFIG.appUrl}/#screen=chat&id=${msg.thread.id}`,
-              recipients,
-            );
-          }
+    // Every participant's client detects the same new message/reaction
+    // independently. claimReminder ensures only one of them actually sends
+    // the push, no matter how many clients are polling at once.
+    for (const msg of newMessages) {
+      if (await claimReminder(`msg_${msg.id}`)) {
+        const sender = state.users.find(u => u.id === msg.fromId);
+        const senderName = sender ? (sender.nickname || sender.firstName) : 'Someone';
+        const recipients = msg.thread.participants.filter(pid => pid !== msg.fromId);
+        if (recipients.length > 0) {
+          sendPushNotificationToUsers(
+            `Message from ${senderName}`,
+            msg.text.substring(0, 200),
+            `${CLUB_CONFIG.appUrl}/#screen=chat&id=${msg.thread.id}`,
+            recipients,
+          );
         }
       }
-      // Only re-render if user isn't actively typing
-      if (!isUserTyping()) render();
     }
+    // This runs regardless of gotNew (which only reflects whether *this*
+    // client's open thread changed) — the reaction owner may well be on a
+    // different screen, or a different device entirely, from whoever's
+    // poller notices the reaction first.
+    for (const r of newReactions) {
+      if (await claimReminder(`reaction_${r.msgId}_${r.emoji}_${r.reactorId}`)) {
+        const reactor = state.users.find(u => u.id === r.reactorId);
+        const reactorName = reactor ? (reactor.nickname || reactor.firstName) : 'Someone';
+        sendPushNotificationToUsers(
+          `${reactorName} reacted ${r.emoji}`,
+          r.text ? r.text.substring(0, 200) : 'to your message',
+          `${CLUB_CONFIG.appUrl}/#screen=chat&id=${r.thread.id}`,
+          [r.ownerId],
+        );
+      }
+    }
+
+    if (gotNew && !isUserTyping()) render();
   } catch(e) { console.log('Message poll error:', e); }
 }
 
@@ -8174,14 +8373,28 @@ function handleDeepLink() {
 window.addEventListener('hashchange', handleDeepLink);
 document.addEventListener('focusin', (e) => {
   if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) {
-    setTimeout(applyKeyboardResize, 50);
+    // Multiple staggered checks, not just one at 50ms: the on-screen
+    // keyboard's open animation takes longer on some Android devices/
+    // keyboards than on iOS, so a single early check can sample
+    // visualViewport before the keyboard has actually finished opening,
+    // read a too-small height, conclude "no keyboard", and never resize
+    // the frame — leaving the bottom nav and input row positioned right
+    // where the keyboard then covers them (both effectively invisible).
+    // The subsequent visualViewport 'resize' listener normally catches
+    // this too, but only if the browser fires incremental resize events
+    // during the animation rather than a single one at the end.
+    [50, 150, 300, 500].forEach(delay => setTimeout(applyKeyboardResize, delay));
   }
 });
 // Defensive fallback: if the tab was suspended and resumed with a hash already
 // present (hashchange may not fire in that case), catch it on visibility resume.
+// Also fire an immediate poll on resume — backgrounded tabs get their timers
+// throttled/suspended by the OS, so without this a second device can sit
+// stale well past the normal 5s cadence until it's brought back to front.
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && window.location.hash) {
-    handleDeepLink();
+  if (document.visibilityState === 'visible') {
+    if (window.location.hash) handleDeepLink();
+    if (state.user) pollAll();
   }
 });
 
