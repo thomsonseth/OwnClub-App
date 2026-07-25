@@ -1294,30 +1294,6 @@
 
   .webview-redirect-text strong { color: var(--teal); }
 
-  /* ── TEAM SELECTION ── */
-  .player-select-row {
-    background: var(--surface);
-    border-radius: 12px;
-    padding: 12px 14px;
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
-
-  .player-checkbox {
-    width: 22px; height: 22px;
-    border-radius: 6px;
-    border: 2px solid var(--border);
-    background: transparent;
-    cursor: pointer;
-    display: flex; align-items: center; justify-content: center;
-    flex-shrink: 0;
-    transition: all 0.2s;
-  }
-
-  .player-checkbox.checked { background: var(--teal); border-color: var(--teal); }
-
-  .player-name-text { flex: 1; font-size: 15px; color: var(--text); font-weight: 500; }
 
   .role-select {
     background-color: var(--surface2);
@@ -1633,6 +1609,17 @@
         notifyButton: { enable: false },
         allowLocalhostAsSecureOrigin: true,
         serviceWorkerPath: '/OneSignalSDKWorker.js',
+        // Default is 'exact' match + 'navigate' action — that only reuses an
+        // already-open tab if its CURRENT url exactly matches the
+        // notification's target url. Since the app clears the hash after
+        // handling each deep link, an open tab's url essentially never
+        // matches a new notification's url, so it was always opening a
+        // fresh window (full splash/reload) even with the app already open.
+        // 'origin' + 'focus' instead: reuse any tab on this domain, just
+        // focus it (no navigation/reload) — the click listener below does
+        // the actual in-app routing once it's focused.
+        notificationClickHandlerMatch: 'origin',
+        notificationClickHandlerAction: 'focus',
       });
 
       // Route notification taps in-app directly, instead of relying on the
@@ -1737,7 +1724,7 @@ const state = {
   chatSearchActive: false,  // whether search bar is open
   reactionPickerMsgId: null, // message id showing emoji picker
   swipedThreadId: null,      // thread id currently showing the swipe-to-delete action
-  selectedPlayers: [],
+  teamSlots: [], // up to 15 { query, userId, captainRole } slots for the Select Team screen
   modal: null,               // { type, ... }
   newMessage: '',
   chatInput: '',
@@ -3028,7 +3015,7 @@ function handleCreateEvent() {
       // Send straight into the existing Select Team screen so the admin can
       // pick the squad — same flow already used for imported fixtures.
       state.activeEventId = newEv.id;
-      state.selectedPlayers = [];
+      state.teamSlots = blankTeamSlots();
       showToast('Match scheduled — now select your team.');
       navigate('teamselect');
       state.prevScreen = 'events';
@@ -3137,26 +3124,21 @@ function handleNewMessage() {
 }
 
 // ── TEAM SELECTION ──────────────────────────────────────────────────────
-function togglePlayerSelection(userId) {
-  const idx = state.selectedPlayers.findIndex(p => p.id === userId);
-  if (idx >= 0) {
-    state.selectedPlayers.splice(idx, 1);
-  } else {
-    state.selectedPlayers.push({ id: userId, captainRole: '' });
-  }
-  render();
-}
-
-function setPlayerRole(userId, role) {
-  const p = state.selectedPlayers.find(p => p.id === userId);
-  if (p) p.captainRole = role;
-  render();
+// Up to 15 slots. Each is either matched to a registered user (userId set)
+// or, once it has text with no match, treated as a manual/guest name.
+function blankTeamSlots() {
+  return Array.from({ length: 15 }, () => ({ query: '', userId: null, captainRole: '' }));
 }
 
 function publishTeamSelection() {
   const ev = state.events.find(e => e.id === state.activeEventId);
   if (ev) {
-    ev.team = state.selectedPlayers.map(p => ({ ...p }));
+    ev.team = state.teamSlots
+      .filter(s => s.query.trim())
+      .map(s => s.userId
+        ? { id: s.userId, captainRole: s.captainRole || '' }
+        : { id: 'guest_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7), name: s.query.trim(), isGuest: true, captainRole: s.captainRole || '' }
+      );
     // Persist to Supabase — replace this event's rows in team_selections
     // wholesale so removed players drop off too. Fire-and-forget, matching
     // the pattern used elsewhere for event/message writes in this app.
@@ -3184,7 +3166,7 @@ function publishTeamSelection() {
       );
     }
   }
-  state.selectedPlayers = [];
+  state.teamSlots = blankTeamSlots();
   navigate('eventdetail', { activeEventId: state.activeEventId });
 }
 
@@ -4746,80 +4728,115 @@ function buildImportFixture() {
 }
 
 // ── TEAM SELECT ───────────────────────────────────────────────────────────
+// Each slot is a free-text input that matches against registered players as
+// you type (or shows everyone available on focus, tap-to-browse style). If
+// what's typed doesn't match a registered player, it's kept as a manual/
+// guest name instead. The live suggestion list is patched directly into its
+// own DOM node (not via the app's normal full render()) so typing doesn't
+// destroy and recreate the focused input on every keystroke — a full
+// render() only happens at natural commit points: picking a suggestion,
+// blurring the field, clearing a slot, or changing a role.
+function buildTeamSlotRow(idx) {
+  const slot = state.teamSlots[idx];
+  const hasContent = slot.query.trim().length > 0;
+  const isMatched = !!slot.userId;
+  const escapedQuery = slot.query.replace(/"/g, '&quot;');
+
+  return `<div style="display:flex;flex-direction:column;gap:4px;">
+    <div style="display:flex;gap:8px;align-items:center;">
+      <div style="width:18px;font-size:12px;color:var(--text-dim);flex-shrink:0;text-align:right;">${idx + 1}</div>
+      <div style="position:relative;flex:1;min-width:0;">
+        <input type="text" id="team-slot-input-${idx}" value="${escapedQuery}" placeholder="Player name"
+          style="width:100%;box-sizing:border-box;background:var(--surface);border:1px solid ${isMatched ? 'var(--teal)' : 'var(--border)'};border-radius:10px;padding:10px 34px 10px 12px;color:var(--text);font-size:14px;"
+          oninput="updateTeamSlotQuery(${idx}, this.value)"
+          onfocus="renderTeamSlotSuggestions(${idx})"
+          onblur="setTimeout(()=>blurTeamSlot(${idx}), 150)"/>
+        ${hasContent ? `<button onclick="clearTeamSlot(${idx})" title="Clear"
+          style="position:absolute;right:6px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--text-dim);font-size:15px;cursor:pointer;padding:4px;line-height:1;">✕</button>` : ''}
+        <div id="team-slot-suggestions-${idx}" style="display:none;position:absolute;top:calc(100% + 4px);left:0;right:0;background:var(--surface);border:1px solid var(--border);border-radius:10px;z-index:20;max-height:180px;overflow-y:auto;"></div>
+      </div>
+      ${hasContent ? `<select class="role-select" style="flex-shrink:0;" onchange="setTeamSlotRole(${idx}, this.value)">
+        <option value="">No role</option>
+        <option value="Captain" ${slot.captainRole === 'Captain' ? 'selected' : ''}>Captain</option>
+        <option value="Wicketkeeper" ${slot.captainRole === 'Wicketkeeper' ? 'selected' : ''}>Wicketkeeper</option>
+      </select>` : ''}
+    </div>
+    ${hasContent && !isMatched ? `<div style="font-size:11px;color:var(--text-dim);padding-left:26px;">No app account — will be added as a guest</div>` : ''}
+  </div>`;
+}
+
 function buildTeamSelect() {
-  const players = state.users.filter(u => u.role === 'Player' || u.role === 'Captain' || u.role === 'Administrator');
-  const count = state.selectedPlayers.length;
-
-  const rows = players.map(p => {
-    const sel = state.selectedPlayers.find(sp => sp.id === p.id);
-    const isChecked = !!sel;
-    return `<div class="player-select-row">
-      <div class="player-checkbox ${isChecked?'checked':''}" onclick="togglePlayer('${p.id}')">
-        ${isChecked ? `<span style="color:#000">${icons.check}</span>` : ''}
-      </div>
-      <div class="player-name-text">${p.firstName} ${p.lastName}</div>
-      ${isChecked ? `<div style="display:flex;flex-direction:column;gap:3px;">
-        <label style="font-size:10px;color:var(--text-dim);font-weight:600;text-transform:uppercase;letter-spacing:0.3px;">Role</label>
-        <select class="role-select" onchange="setPlayerRole('${p.id}', this.value)">
-          <option value="">No role</option>
-          <option value="Captain" ${sel.captainRole==='Captain'?'selected':''}>Captain</option>
-          <option value="Wicketkeeper" ${sel.captainRole==='Wicketkeeper'?'selected':''}>Wicketkeeper</option>
-        </select>
-      </div>` : ''}
-    </div>`;
-  }).join('');
-
-  // Guest players — added by typed name, for someone selected who doesn't
-  // have the app / an app profile. Not saved anywhere beyond this event.
-  const guests = state.selectedPlayers.filter(p => p.isGuest);
-  const guestRows = guests.map(p => `<div class="player-select-row">
-      <div class="player-checkbox checked" onclick="removeGuestPlayer('${p.id}')">
-        <span style="color:#000">${icons.check}</span>
-      </div>
-      <div class="player-name-text">${p.name} <span style="color:var(--text-dim);font-size:11px;">(Guest)</span></div>
-      <div style="display:flex;flex-direction:column;gap:3px;">
-        <label style="font-size:10px;color:var(--text-dim);font-weight:600;text-transform:uppercase;letter-spacing:0.3px;">Role</label>
-        <select class="role-select" onchange="setPlayerRole('${p.id}', this.value)">
-          <option value="">No role</option>
-          <option value="Captain" ${p.captainRole==='Captain'?'selected':''}>Captain</option>
-          <option value="Wicketkeeper" ${p.captainRole==='Wicketkeeper'?'selected':''}>Wicketkeeper</option>
-        </select>
-      </div>
-    </div>`).join('');
+  const count = state.teamSlots.filter(s => s.query.trim()).length;
+  const rows = state.teamSlots.map((_, idx) => buildTeamSlotRow(idx)).join('');
 
   return `<div class="screen">
     ${buildTopBanner({ title: 'Select Team', showBack: true })}
     <div class="screen-scroll">
-      <div style="padding:16px;display:flex;flex-direction:column;gap:12px;">
+      <div style="padding:16px;display:flex;flex-direction:column;gap:10px;">
         <div class="selected-count-badge">${count} selected</div>
         ${rows}
-        ${guestRows}
-        <div style="display:flex;gap:8px;padding-top:4px;">
-          <input type="text" id="guest-player-name" placeholder="Manually enter player name"
-            style="flex:1;min-width:0;box-sizing:border-box;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 12px;color:var(--text);font-size:14px;"
-            onkeydown="if(event.key==='Enter'){event.preventDefault();addGuestPlayer();}"/>
-          <button onclick="addGuestPlayer()"
-            style="flex-shrink:0;width:auto;background:var(--surface);color:var(--text);border:none;border-radius:10px;padding:0 18px;font-size:14px;font-weight:600;cursor:pointer;">Add</button>
-        </div>
         <button class="btn-primary" onclick="publishTeam()">Publish selection</button>
       </div>
     </div>
   </div>`;
 }
 
-function addGuestPlayer() {
-  const input = document.getElementById('guest-player-name');
-  const name = (input?.value || '').trim();
-  if (!name) return;
-  state.selectedPlayers.push({ id: 'guest_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7), name, captainRole: '', isGuest: true });
-  render();
-}
+window.updateTeamSlotQuery = (idx, value) => {
+  const slot = state.teamSlots[idx];
+  if (!slot) return;
+  slot.query = value;
+  slot.userId = null; // retyping invalidates a previous match until re-confirmed
+  window.renderTeamSlotSuggestions(idx);
+};
 
-function removeGuestPlayer(id) {
-  const idx = state.selectedPlayers.findIndex(p => p.id === id);
-  if (idx >= 0) state.selectedPlayers.splice(idx, 1);
-  render();
-}
+window.renderTeamSlotSuggestions = (idx) => {
+  const box = document.getElementById('team-slot-suggestions-' + idx);
+  if (!box) return;
+  const slot = state.teamSlots[idx];
+  const q = slot.query.trim().toLowerCase();
+  const players = state.users.filter(u => u.role === 'Player' || u.role === 'Captain' || u.role === 'Administrator');
+  const usedIds = new Set(state.teamSlots.filter((s, i) => i !== idx && s.userId).map(s => s.userId));
+  const matches = players.filter(p => !usedIds.has(p.id) && (!q || `${p.firstName} ${p.lastName}`.toLowerCase().includes(q))).slice(0, 8);
+  if (matches.length === 0) {
+    box.style.display = 'none';
+    box.innerHTML = '';
+    return;
+  }
+  box.innerHTML = matches.map(p =>
+    `<div onmousedown="selectTeamSlotUser(${idx}, '${p.id}')" style="padding:10px 12px;font-size:14px;color:var(--text);cursor:pointer;">${p.firstName} ${p.lastName}</div>`
+  ).join('');
+  box.style.display = 'block';
+};
+
+window.selectTeamSlotUser = (idx, userId) => {
+  const slot = state.teamSlots[idx];
+  const u = state.users.find(u => u.id === userId);
+  if (!slot || !u) return;
+  slot.userId = userId;
+  slot.query = `${u.firstName} ${u.lastName}`;
+  // Forced: this fires via onmousedown, before the input has actually blurred,
+  // so isUserTyping() would still read true and a plain render() would
+  // silently no-op — the selection wouldn't show until the delayed blur
+  // handler's render() picked it up ~150ms later. Force it so it's immediate.
+  render(true);
+};
+
+window.blurTeamSlot = (idx) => {
+  const box = document.getElementById('team-slot-suggestions-' + idx);
+  if (box) { box.style.display = 'none'; box.innerHTML = ''; }
+  render(true); // reflect final matched-vs-guest state (border color, role select, guest hint)
+};
+
+window.clearTeamSlot = (idx) => {
+  state.teamSlots[idx] = { query: '', userId: null, captainRole: '' };
+  render(true);
+};
+
+window.setTeamSlotRole = (idx, role) => {
+  const slot = state.teamSlots[idx];
+  if (slot) slot.captainRole = role;
+  render(true);
+};
 
 // ── MESSAGES LIST ─────────────────────────────────────────────────────────
 function buildMessages() {
@@ -6298,7 +6315,7 @@ window.toggleGradeAccordion = (gradeName) => {
 
 window.openEvent = (id) => {
   state.activeEventId = id;
-  state.selectedPlayers = [];
+  state.teamSlots = blankTeamSlots();
   navigate('eventdetail');
   state.prevScreen = 'events';
 };
@@ -6306,7 +6323,18 @@ window.openEvent = (id) => {
 window.openSelectPlayers = (id) => {
   const ev = state.events.find(e => e.id === id);
   state.activeEventId = id;
-  state.selectedPlayers = ev?.team ? ev.team.map(p => ({ ...p })) : [];
+  state.teamSlots = blankTeamSlots();
+  (ev?.team || []).forEach((p, i) => {
+    if (i >= 15) return; // cap at 15 slots
+    if (p.isGuest) {
+      state.teamSlots[i] = { query: p.name, userId: null, captainRole: p.captainRole || '' };
+    } else {
+      const u = state.users.find(u => u.id === p.id);
+      state.teamSlots[i] = u
+        ? { query: `${u.firstName} ${u.lastName}`, userId: p.id, captainRole: p.captainRole || '' }
+        : { query: '', userId: null, captainRole: '' };
+    }
+  });
   navigate('teamselect');
   state.prevScreen = 'eventdetail';
 };
@@ -6571,8 +6599,6 @@ window.doCreateEvent = () => {
   handleCreateEvent();
 };
 
-window.togglePlayer = (id) => togglePlayerSelection(id);
-window.setPlayerRole = (id, role) => { setPlayerRole(id, role); };
 window.publishTeam = () => publishTeamSelection();
 
 // ── CHAT SEARCH ──────────────────────────────────────────────────────────
