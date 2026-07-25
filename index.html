@@ -3171,9 +3171,102 @@ function publishTeamSelection() {
         selectedIds,
       );
     }
+
+    syncGradeTeamChat(ev);
   }
   state.teamSlots = blankTeamSlots();
   navigate('eventdetail', { activeEventId: state.activeEventId });
+}
+
+// A short, single-word form of a team name for compact chat titles —
+// "Kilcunda Bass CC" -> "Kilcunda", "Laurimar Power CC" -> "Laurimar".
+// Simple heuristic (first word); unusual club names may shorten oddly, but
+// this matches the format asked for and is easy to adjust later.
+function shortTeamName(name) {
+  return (name || '').trim().split(/\s+/)[0] || name || '';
+}
+
+// Creates (once a grade first reaches a full XI+reserves) or updates a
+// standing group chat for a grade, reused week to week across fixtures —
+// title reflects the current match, membership tracks the current
+// selection. Fire-and-forget, same pattern as the other publish-time writes
+// above; failures here shouldn't block the team-selection publish itself.
+async function syncGradeTeamChat(ev) {
+  try {
+    if (!ev.grade) return; // no grade to key a rolling chat off — skip entirely
+    // Threshold counts everyone selected — guests included — since that's
+    // what "a full team" means; guests just can't actually be added to the
+    // chat below (no app account to add).
+    if (ev.team.length < 11) return;
+    const rosterIds = ev.team.filter(p => !p.isGuest).map(p => p.id);
+    if (rosterIds.length === 0) return; // nobody selected has an account — nothing to create/update
+
+    const gradeKey = [ev.grade, ev.gender].filter(Boolean).join('|');
+    const title = [ev.grade, shortTeamName(ev.homeTeam), 'V', shortTeamName(ev.awayTeam)].filter(Boolean).join(' ');
+
+    const existingRows = await sb.select('grade_chats', `grade_key=eq.${encodeURIComponent(gradeKey)}`);
+    const existing = Array.isArray(existingRows) && existingRows[0] ? existingRows[0] : null;
+
+    if (!existing) {
+      const threadRows = await sb.insert('threads', { is_group: true, name: title, participants: rosterIds });
+      const threadId = Array.isArray(threadRows) && threadRows[0]?.id ? threadRows[0].id : null;
+      if (!threadId) return;
+      await sb.insert('grade_chats', { grade_key: gradeKey, thread_id: threadId, roster_user_ids: rosterIds });
+      await sb.insert('messages', { thread_id: threadId, from_id: null, is_system: true, text: `Team chat created for ${title}.` });
+      sendPushNotificationToUsers(
+        'Added to a group chat',
+        `You've been added to "${title}"`,
+        `${CLUB_CONFIG.appUrl}/#screen=chat&id=${threadId}`,
+        rosterIds,
+      );
+      return;
+    }
+
+    // Diff against the last known ROSTER (tracked separately), not the
+    // thread's live participant list — so anyone manually added afterward
+    // (e.g. a coach who isn't a selected player) is left alone by this sync
+    // instead of getting silently removed for not being on the team sheet.
+    const oldRosterIds = existing.roster_user_ids || [];
+    const toAdd = rosterIds.filter(id => !oldRosterIds.includes(id));
+    const toRemove = oldRosterIds.filter(id => !rosterIds.includes(id));
+
+    const threadRows = await sb.select('threads', `id=eq.${existing.thread_id}`);
+    const thread = Array.isArray(threadRows) && threadRows[0] ? threadRows[0] : null;
+    if (!thread) return; // the linked thread is gone — bail rather than guess
+
+    const participants = Array.isArray(thread.participants) ? [...thread.participants] : [];
+    toRemove.forEach(id => { const i = participants.indexOf(id); if (i >= 0) participants.splice(i, 1); });
+    toAdd.forEach(id => { if (!participants.includes(id)) participants.push(id); });
+
+    const titleChanged = thread.name !== title;
+    await sb.update('threads', { name: title, participants }, { id: existing.thread_id });
+    // sb.update()'s match-object query builder doesn't URL-encode values, and
+    // gradeKey can contain spaces/pipes (e.g. "1st XI|Male") — encode it
+    // ourselves so it lands correctly in the query string.
+    await sb.update('grade_chats', { roster_user_ids: rosterIds, updated_at: new Date().toISOString() }, { grade_key: encodeURIComponent(gradeKey) });
+
+    // Persisted (not local-only) system messages so every participant sees
+    // what changed when they next open the chat, on whichever device.
+    if (titleChanged) {
+      await sb.insert('messages', { thread_id: existing.thread_id, from_id: null, is_system: true, text: `Team chat updated for ${title}.` });
+    }
+    for (const id of toAdd) {
+      const u = state.users.find(u => u.id === id);
+      await sb.insert('messages', { thread_id: existing.thread_id, from_id: null, is_system: true, text: `${u ? (u.nickname || u.firstName) : 'A player'} added to the team chat.` });
+    }
+    for (const id of toRemove) {
+      const u = state.users.find(u => u.id === id);
+      await sb.insert('messages', { thread_id: existing.thread_id, from_id: null, is_system: true, text: `${u ? (u.nickname || u.firstName) : 'A player'} removed from the team chat.` });
+    }
+    if (toAdd.length > 0) {
+      sendPushNotificationToUsers(
+        'Added to a group chat',
+        `You've been added to "${title}"`,
+        `${CLUB_CONFIG.appUrl}/#screen=chat&id=${existing.thread_id}`,
+        toAdd,
+      );
+    }
+  } catch (e) { console.log('Grade team chat sync error:', e); }
 }
 
 // ── SVG ICONS ──────────────────────────────────────────────────────────
@@ -6813,6 +6906,12 @@ window.addMemberToGroup = (userId) => {
       ts: Date.now(),
       system: true,
     });
+    sendPushNotificationToUsers(
+      'Added to a group chat',
+      `You've been added to "${thread.name || 'a group chat'}"`,
+      `${CLUB_CONFIG.appUrl}/#screen=chat&id=${thread.id}`,
+      [userId],
+    );
   }
   state.chatInfoAddSearch = '';
   showToast('Member added!');
