@@ -1721,7 +1721,7 @@ const state = {
   matchIdx: 0,               // current index in match arrow slider
   socialIdx: 0,              // current index in social arrow slider
   pendingSignup: null,        // set when email confirmation required
-  prevScreen: null,
+  navStack: [], // back-history — navigate() pushes, goBack()/goBackAuth() pop
   user: null,                // logged in user
   toggles: { social: true, announcements: true, teamSelection: true, training: true },
   events: [],
@@ -2834,7 +2834,25 @@ function cleanupEmptyPendingChat(nextScreen) {
 
 function navigate(screen, extra = {}) {
   cleanupEmptyPendingChat(screen);
-  state.prevScreen = state.screen;
+  // Push the screen we're leaving onto real back-history — a single
+  // "prevScreen" pointer can't survive an A→B→A→back loop (it just
+  // alternates), which is exactly what broke the splash/login/signup flow.
+  if (state.screen && state.screen !== screen) {
+    const loopIdx = state.navStack.lastIndexOf(screen);
+    if (loopIdx !== -1) {
+      // Navigating to a screen already sitting in history (e.g. login's
+      // "Create account" link, then signup's own "Already have an account?
+      // Login" link — a forward-style link that switches back to somewhere
+      // you've already been) — collapse back to that point instead of
+      // stacking a duplicate. Otherwise Back would step through the loop
+      // you just closed (→ signup) before ever reaching what was there
+      // before you first visited login (→ splash).
+      state.navStack.length = loopIdx;
+    } else {
+      state.navStack.push(state.screen);
+      if (state.navStack.length > 30) state.navStack.shift();
+    }
+  }
   Object.assign(state, extra);
   state.screen = screen;
   state.error = '';
@@ -2845,6 +2863,19 @@ function navigate(screen, extra = {}) {
   }
   if (document.activeElement) document.activeElement.blur();
   render(true);
+}
+
+// Overrides where the top of history should land on a specific screen
+// rather than wherever navigate() naturally recorded — e.g. after saving an
+// edited event, "back" from its detail page should return to the events
+// list even if you'd arrived at the edit form some other way. Call right
+// after the navigate() that produced the entry to replace.
+function forceBackTarget(screen) {
+  if (state.navStack.length > 0) {
+    state.navStack[state.navStack.length - 1] = screen;
+  } else {
+    state.navStack.push(screen);
+  }
 }
 
 function sliderNav(prefix, dir) {
@@ -2867,10 +2898,9 @@ window.goToEventsTab = function(tab) {
 
 function goBack() {
   if (state.screen === 'createevent') state.editingEventId = null;
-  const back = state.prevScreen || 'home';
+  const back = state.navStack.pop() || 'home';
   cleanupEmptyPendingChat(back);
   state.screen = back;
-  state.prevScreen = null;
   render();
 }
 
@@ -2879,6 +2909,11 @@ function setTab(tab) {
   cleanupEmptyPendingChat(tabScreens[tab]);
   state.activeTab = tab;
   state.screen = tabScreens[tab];
+  // Tapping the tab bar is a fresh start, not a "back" step — reset history
+  // so leftover browsing from a previous tab (e.g. having drilled into
+  // Events → Training) can't leak into what "back" does after switching
+  // tabs and opening something new.
+  state.navStack = [];
   if (tab === 'events') state.newEventIds.clear();
   render();
 }
@@ -2984,7 +3019,7 @@ function handleCreateEvent() {
     showToast('Event updated!');
     state.activeEventId = editedId;
     navigate('eventdetail');
-    state.prevScreen = 'events';
+    forceBackTarget('events');
   } else {
     // ── CREATE new event ──
     const newEv = {
@@ -3040,7 +3075,7 @@ function handleCreateEvent() {
       state.teamSlots = blankTeamSlots();
       showToast('Match scheduled — now select your team.');
       navigate('teamselect');
-      state.prevScreen = 'events';
+      forceBackTarget('events');
       // Once the real Supabase UUID comes back, keep activeEventId pointed
       // at it so "Publish selection" saves against the right row.
       const tempId = newEv.id;
@@ -3145,8 +3180,9 @@ function handleNewMessage() {
   state.contactSearch = '';
   state.selectedContacts = [];
   state.newGroupName = '';
+  // Always invoked from the Messages screen — navigate()'s own history push
+  // already records that correctly, no override needed.
   navigate('newconversation');
-  state.prevScreen = 'messages';
 }
 
 // ── TEAM SELECTION ──────────────────────────────────────────────────────
@@ -6211,13 +6247,22 @@ function initDateTimeWheelPicker() {
 // ── GLOBAL FUNCTIONS (called from onclick) ────────────────────────────────
 window.navigate = navigate;
 
-// The auth screens' Back buttons need state.prevScreen — but onclick attribute
+// The auth screens' Back buttons need access to state — but onclick attribute
 // text executes in global scope, and `state` is module-scoped (never on
 // window), so referencing it directly in an onclick string throws silently.
 // Routing through this window-exposed function works because the function
 // BODY still runs with its original module-scope closure over `state`.
+//
+// This must pop navStack directly rather than calling navigate() — routing
+// "back" through navigate() would push a *new* history entry for every back
+// press instead of consuming one, which is exactly what turned
+// splash→login→signup→login→back into a loop that could never get past
+// signup: each "back" was recorded as a fresh forward step.
 function goBackAuth(fallback) {
-  navigate(state.prevScreen || fallback);
+  const back = state.navStack.pop() || fallback;
+  state.screen = back;
+  state.error = '';
+  render(true);
 }
 window.goBackAuth = goBackAuth;
 window.goHome = () => { state.activeTab = 'home'; navigate('home'); };
@@ -6518,8 +6563,13 @@ window.toggleGradeAccordion = (gradeName) => {
 window.openEvent = (id) => {
   state.activeEventId = id;
   state.teamSlots = blankTeamSlots();
+  // Called from both the Events list and the presented Match/Social cards
+  // on Home — this used to always force 'events' as the back-target
+  // regardless of where the user actually was, so opening an event from
+  // Home and pressing Back would land wherever Events last happened to be
+  // (e.g. Training) instead of Home. navigate()'s own history push already
+  // records the true origin correctly — no override needed.
   navigate('eventdetail');
-  state.prevScreen = 'events';
 };
 
 window.openSelectPlayers = (id) => {
@@ -6537,8 +6587,9 @@ window.openSelectPlayers = (id) => {
         : { query: '', userId: null, captainRole: '' };
     }
   });
+  // Only reachable from the event detail screen's "Select players" button —
+  // navigate()'s natural history push already records that correctly.
   navigate('teamselect');
-  state.prevScreen = 'eventdetail';
 };
 
 window.doRSVP = (eventId, status) => {
@@ -6754,8 +6805,9 @@ window.openEditEvent = (id) => {
       : { immediate: false, weekly: false, oneWeekBefore: false, oneDayBefore: false },
   };
   state.error = '';
+  // Only reachable from the event detail screen's "Edit" button —
+  // navigate()'s natural history push already records that correctly.
   navigate('createevent');
-  state.prevScreen = 'eventdetail';
 };
 
 window.openCreateEvent = () => {
@@ -6764,7 +6816,7 @@ window.openCreateEvent = () => {
   state.createEventForm = blankCreateEventForm();
   state.error = '';
   navigate('createevent');
-  state.prevScreen = 'events';
+  forceBackTarget('events');
 };
 
 window.openScheduleMatch = () => {
@@ -6779,7 +6831,7 @@ window.openScheduleMatch = () => {
   };
   state.error = '';
   navigate('createevent');
-  state.prevScreen = 'events';
+  forceBackTarget('events');
 };
 
 window.confirmDeleteEvent = (id) => {
@@ -7099,7 +7151,10 @@ window.openChat = (id) => {
   state.chatSearchActive = false;
   state.reactionPickerMsgId = null;
   state.chatInfoAddSearch = '';
-  state.prevScreen = 'messages';
+  // Bypasses navigate(), so push history manually — whatever screen was
+  // actually open (messages list, or wherever a notification tap landed)
+  // rather than always hardcoding 'messages' regardless of true origin.
+  if (state.screen && state.screen !== 'chat') state.navStack.push(state.screen);
   state.screen = 'chat';
   state.activeTab = 'messages';
   // Mark as read
@@ -7316,7 +7371,7 @@ window.deleteAnnouncement = async (id) => {
     localStorage.setItem('clubapp_deleted_anns', JSON.stringify(deleted.slice(-50)));
   } catch(e) {}
   navigate('announcements');
-  state.prevScreen = 'home';
+  forceBackTarget('home');
   // Delete from Supabase - DO NOT remove from blacklist after, leave it there
   // so poll never re-adds it even if Supabase is slow
   try { await sb.delete('announcements', { id }); } catch(e) {}
@@ -7400,7 +7455,7 @@ window.publishAnnouncement = () => {
     reset();
     showToast(f.sendNotification ? 'Announcement published & notification sent!' : 'Announcement published!');
     navigate('announcements');
-    state.prevScreen = 'home';
+    forceBackTarget('home');
   }
 };
 
@@ -7460,8 +7515,9 @@ window.openUser = (id) => {
   state.activeUserId = id;
   state.userDetailEditing = false;
   state.userDetailForm = {};
+  // Only reachable from the User List — navigate()'s natural history push
+  // already records that correctly.
   navigate('userdetail');
-  state.prevScreen = 'userlist';
 };
 
 window.removeUserAvatar = (id) => {
@@ -8690,19 +8746,22 @@ function handleDeepLink(hashOverride) {
 
   if (screen === 'eventdetail' && id) {
     state.activeEventId = id;
-    state.prevScreen = 'events';
     state.activeTab = 'events';
     navigate('eventdetail');
+    // Note: this must come AFTER navigate() — setting it before was a
+    // pre-existing bug, since navigate() unconditionally captures the
+    // current screen itself, silently clobbering an override set earlier.
+    forceBackTarget('events');
   } else if (screen === 'announcements') {
     state.activeTab = 'home';
     navigate('announcements');
-    state.prevScreen = 'home';
+    forceBackTarget('home');
   } else if (screen === 'chat' && id) {
     openChat(id);
   } else if (screen === 'userlist') {
     state.activeTab = 'menu';
     navigate('userlist');
-    state.prevScreen = 'menu';
+    forceBackTarget('menu');
   }
   // Clear the hash so it doesn't re-navigate on refresh (only relevant when
   // we actually came from the address bar's own hash).
