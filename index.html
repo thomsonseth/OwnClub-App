@@ -2866,10 +2866,15 @@ function navigate(screen, extra = {}) {
 }
 
 // Overrides where the top of history should land on a specific screen
-// rather than wherever navigate() naturally recorded — e.g. after saving an
-// edited event, "back" from its detail page should return to the events
-// list even if you'd arrived at the edit form some other way. Call right
-// after the navigate() that produced the entry to replace.
+// rather than wherever navigate() naturally recorded. Only use this when the
+// screen being left is now invalid (deleted/just-submitted) AND there's a
+// single known-correct true origin — e.g. announcements are only ever
+// reached via Home, so after publishing/editing/deleting one, force 'home'
+// rather than risk landing back on a stale form or a deleted item's own
+// detail screen. If the screen being left is still valid to revisit, prefer
+// plain navigate() and let the loop-collapse rule find the real origin
+// instead of hardcoding one. Call right after the navigate() that produced
+// the entry to replace.
 function forceBackTarget(screen) {
   if (state.navStack.length > 0) {
     state.navStack[state.navStack.length - 1] = screen;
@@ -3018,8 +3023,13 @@ function handleCreateEvent() {
     state.createEventForm = blankCreateEventForm();
     showToast('Event updated!');
     state.activeEventId = editedId;
-    navigate('eventdetail');
-    forceBackTarget('events');
+    // Edit is only reachable from eventdetail (see openEditEvent), so
+    // 'eventdetail' is already sitting in navStack from before Edit was
+    // tapped — navigate()'s own loop-collapse rule removes the duplicate and
+    // restores whatever was truly beneath it (home or events, wherever this
+    // event was actually opened from). Forcing 'events' here overrode that
+    // correct value and sent Back to the wrong place for events opened from
+    // Home's presented-match card.
   } else {
     // ── CREATE new event ──
     const newEv = {
@@ -7419,6 +7429,14 @@ window.publishAnnouncement = () => {
     reset();
     showToast(f.sendNotification ? 'Announcement updated & notification sent!' : 'Announcement updated!');
     navigate('announcements');
+    // Announcements are only ever reached via Home (slider or "See all"), so
+    // 'home' is always the correct true origin. Needed here for symmetry
+    // with the create/delete branches below: when Edit was opened directly
+    // from Home's slider (bypassing the list), 'announcements' isn't yet in
+    // navStack, so the loop-collapse rule can't clean up the stale
+    // 'anndetail'/'createannouncement' entries on its own — without this,
+    // Back from the list would land on the just-submitted, now-reset form.
+    forceBackTarget('home');
   } else {
     // ── CREATE new announcement ───────────────────────────────────────
     const today = new Date().toISOString().slice(0, 10);
