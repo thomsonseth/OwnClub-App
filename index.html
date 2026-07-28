@@ -1127,15 +1127,15 @@
   }
   .cost-toggle-label { font-size: 15px; font-weight: 600; color: var(--text); }
 
-  .stripe-link-box {
+  .square-status-box {
     background: var(--surface2);
     border: 1px solid #4ecdc455;
     border-radius: 12px;
     padding: 12px 14px;
     display: flex; flex-direction: column; gap: 6px;
   }
-  .stripe-link-label { font-size: 11px; font-weight: 700; color: var(--accent); letter-spacing: 0.5px; text-transform: uppercase; }
-  .stripe-link-url { font-size: 12px; color: var(--text-muted); word-break: break-all; }
+  .square-status-label { font-size: 11px; font-weight: 700; color: var(--accent); letter-spacing: 0.5px; text-transform: uppercase; }
+  .square-status-text { font-size: 12px; color: var(--text-muted); }
 
   .notif-section { display: flex; flex-direction: column; gap: 10px; }
   .notif-option {
@@ -1681,6 +1681,7 @@ const LOGO_IMG_B64 = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAXcAAAGhCAYA
 // ║  Change these values to brand the app for any club.          ║
 // ╚══════════════════════════════════════════════════════════════╝
 const CLUB_CONFIG = {
+  id:              '35f122b5-1e3b-4ad4-929b-9f736bdf3d96', // opaque club id used by square-proxy; see migrations/001_square_ticketing.sql
   clubName:        'Laurimar Power Cricket Club',
   clubShortName:   'Laurimar Power CC',
   clubDescription: 'A dynamic cricket club based in Melbourne\'s northern suburbs, committed to competitive cricket and building a strong community.',
@@ -1745,6 +1746,10 @@ const state = {
   reactionPickerMsgId: null, // message id showing emoji picker
   swipedThreadId: null,      // thread id currently showing the swipe-to-delete action
   teamSlots: [], // up to 15 { query, userId, captainRole } slots for the Select Team screen
+  squareStatus: null,        // { connected, merchantId, locationId } — fetched once at load
+  buyTickets: null,          // { eventId, attendees: [{ query, name, profileId }], submitting } while the ticket modal is open
+  activePaymentOrderId: null, // orders.id being shown on the payment confirmation screen
+  paymentOrderCache: null,   // last-fetched orders row for activePaymentOrderId
   modal: null,               // { type, ... }
   newMessage: '',
   chatInput: '',
@@ -1772,7 +1777,6 @@ const state = {
     aiPrompt: '',          // AI image prompt
     aiGenerating: false,   // loading state
     aiImage: null,         // base64 AI-generated image result
-    stripeLink: null,      // mock stripe link once generated
     notifications: {       // push notification schedule
       immediate: false,
       weekly: false,
@@ -1993,7 +1997,6 @@ function rowToEvent(r) {
     location: r.location || '',
     description: r.description || '',
     cost: parseFloat(r.cost) || 0,
-    stripeLink: r.stripe_link || null,
     image: r.image_url || null,
     grade: r.grade || null,
     gradeId: r.grade_id || null,
@@ -2010,6 +2013,7 @@ function rowToEvent(r) {
     playHQId: r.play_hq_id || null,
     notifications: r.notifications || {},
     rsvp: {},   // populated separately
+    rsvpGuests: {}, // populated separately — user_id -> guest_count for paid ticket purchases
     team: [],   // populated separately
   };
 }
@@ -2026,7 +2030,6 @@ function eventToRow(ev) {
     location: ev.location || null,
     description: ev.description || null,
     cost: ev.cost || 0,
-    stripe_link: ev.stripeLink || null,
     image_url: ev.image || null,
     grade: ev.grade || null,
     grade_id: ev.gradeId || null,
@@ -2051,6 +2054,7 @@ async function loadAppData(silent = false) {
     state.loading = true;
     render(true);
   }
+  if (!state.squareStatus) fetchSquareStatus(); // fire-and-forget, only needed once per session
 
   try {
     // These six don't depend on each other's *results* being fetched — only
@@ -2077,7 +2081,10 @@ async function loadAppData(silent = false) {
     if (Array.isArray(rsvps)) {
       rsvps.forEach(r => {
         const ev = state.events.find(e => e.id === r.event_id);
-        if (ev) ev.rsvp[r.user_id] = r.status;
+        if (ev) {
+          ev.rsvp[r.user_id] = r.status;
+          if (r.guest_count) ev.rsvpGuests[r.user_id] = r.guest_count;
+        }
       });
     }
 
@@ -2935,7 +2942,7 @@ function handleDeleteProfile() {
   render();
 }
 
-function handleRSVP(eventId, status, currentStatus, stripeLink) {
+function handleRSVP(eventId, status, currentStatus) {
   const ev = state.events.find(e => e.id === eventId);
   if (!ev || !state.user) return;
 
@@ -2945,15 +2952,9 @@ function handleRSVP(eventId, status, currentStatus, stripeLink) {
     return;
   }
 
-  if (status === 'going' && currentStatus !== 'going' && ev.cost > 0) {
-    if (stripeLink && stripeLink.startsWith('http') && !stripeLink.includes('mock')) {
-      window.location.href = stripeLink;
-    }
-    ev.rsvp[state.user.id] = 'going';
-    sb.upsert('rsvps', { event_id: eventId, user_id: state.user.id, status: 'going' });
-    render();
-    return;
-  }
+  // Paid events never set 'going' from here — that only happens once
+  // square-proxy's webhook confirms payment (see openBuyTickets/window.doRSVP).
+  if (status === 'going' && ev.cost > 0) return;
 
   if (currentStatus === status) {
     delete ev.rsvp[state.user.id];
@@ -2971,7 +2972,7 @@ function blankCreateEventForm() {
     description: '', hasCost: false, cost: '', recipients: 'all',
     opponent: '', gender: '', format: '', grade: '', homeAway: 'Home',
     image: null, aiPrompt: '', aiGenerating: false, aiImage: null,
-    stripeLink: null, imageTab: 'upload',
+    imageTab: 'upload',
     notifications: { immediate: false, weekly: false, oneWeekBefore: false, oneDayBefore: false },
   };
 }
@@ -2987,7 +2988,6 @@ function handleCreateEvent() {
   } else {
     if (!f.title || !f.date) { state.error = 'Title and date are required.'; render(); return; }
   }
-  const stripeLink = f.hasCost && f.cost && f.stripeLink ? f.stripeLink : null;
   const matchTitle = isMatch
     ? (f.homeAway === 'Away' ? `${f.opponent} vs ${CLUB_CONFIG.clubShortName}` : `${CLUB_CONFIG.clubShortName} vs ${f.opponent}`)
     : f.title;
@@ -3004,7 +3004,6 @@ function handleCreateEvent() {
       ev.location    = f.location;
       ev.description = f.description;
       ev.cost        = f.hasCost ? parseFloat(f.cost) || 0 : 0;
-      ev.stripeLink  = stripeLink;
       if (f.image) ev.image = f.image;
       ev.notifications = { ...f.notifications };
       // Persist to Supabase
@@ -3043,10 +3042,10 @@ function handleCreateEvent() {
       location: f.location,
       description: f.description,
       cost: f.hasCost ? parseFloat(f.cost) || 0 : 0,
-      stripeLink,
       image: f.image || f.aiImage || null,
       notifications: { ...f.notifications },
       rsvp: {},
+      rsvpGuests: {},
       team: [],
       ...(isMatch ? {
         gender: f.gender || null,
@@ -3445,6 +3444,9 @@ function buildScreen() {
     if (s === 'home') return buildHome();
     if (s === 'events') return buildEvents();
     if (s === 'eventdetail') return buildEventDetail();
+    if (s === 'buytickets') return buildBuyTickets();
+    if (s === 'paymentconfirmation') return buildPaymentConfirmation();
+    if (s === 'adminsquare') return buildAdminSquare();
     if (s === 'createevent') return buildCreateEvent();
     if (s === 'importfixture') return buildImportFixture();
     if (s === 'trainingschedule') return buildTrainingSchedule();
@@ -3471,7 +3473,7 @@ function buildScreen() {
 
   return `<div style="display:flex;flex-direction:column;height:100%;position:relative;">
     ${mainContent}
-    ${['home','events','eventdetail','createevent','importfixture','trainingschedule','teamselect','messages','chat','chatinfo','newconversation','menu','profile','clubinfo','registration','shop','settings','userlist','userdetail','announcements','createannouncement'].includes(s) ? buildBottomNav() : ''}
+    ${['home','events','eventdetail','buytickets','paymentconfirmation','adminsquare','createevent','importfixture','trainingschedule','teamselect','messages','chat','chatinfo','newconversation','menu','profile','clubinfo','registration','shop','settings','userlist','userdetail','announcements','createannouncement'].includes(s) ? buildBottomNav() : ''}
     ${modal}
   </div>`;
 }
@@ -3878,7 +3880,11 @@ function buildHome() {
       <div class="rsvp-row" onclick="event.stopPropagation()" style="padding:0 14px 14px;">
         ${ev.cost > 0 && myRsvp === 'going'
           ? `<div style="color:var(--green);font-size:13px;font-weight:600;padding:4px 0;">✓ Going — payment confirmed</div>`
-          : `<button class="rsvp-btn ${myRsvp==='going'?'going':''}" onclick="event.stopPropagation();doRSVP('${ev.id}','going')">${ev.cost > 0 ? '✓ Going 💳' : '✓ Going'}</button>
+          : ev.cost > 0
+          ? `<button class="rsvp-btn" onclick="event.stopPropagation();openBuyTickets('${ev.id}')">🎟 Buy Tickets</button>
+             <button class="rsvp-btn ${myRsvp==='notgoing'?'notgoing':''}" onclick="event.stopPropagation();doRSVP('${ev.id}','notgoing')">✗ No</button>
+             <button class="rsvp-btn ${myRsvp==='maybe'?'maybe':''}" onclick="event.stopPropagation();doRSVP('${ev.id}','maybe')">? Maybe</button>`
+          : `<button class="rsvp-btn ${myRsvp==='going'?'going':''}" onclick="event.stopPropagation();doRSVP('${ev.id}','going')">✓ Going</button>
              <button class="rsvp-btn ${myRsvp==='notgoing'?'notgoing':''}" onclick="event.stopPropagation();doRSVP('${ev.id}','notgoing')">✗ No</button>
              <button class="rsvp-btn ${myRsvp==='maybe'?'maybe':''}" onclick="event.stopPropagation();doRSVP('${ev.id}','maybe')">? Maybe</button>`
         }
@@ -4129,7 +4135,11 @@ function buildEventCard(ev, isAdmin) {
     <div class="rsvp-row" onclick="event.stopPropagation()">
       ${paidAndGoing
         ? `<div style="color:var(--green);font-size:13px;font-weight:600;padding:6px 0;">✓ Going — payment confirmed</div>`
-        : `<button class="rsvp-btn ${myRsvp==='going'?'going':''}" onclick="event.stopPropagation(); doRSVP('${ev.id}','going')">${ev.cost > 0 ? '✓ Going 💳' : '✓ Going'}</button>
+        : ev.cost > 0
+        ? `<button class="rsvp-btn" onclick="event.stopPropagation(); openBuyTickets('${ev.id}')">🎟 Buy Tickets</button>
+           <button class="rsvp-btn ${myRsvp==='notgoing'?'notgoing':''}" onclick="event.stopPropagation(); doRSVP('${ev.id}','notgoing')">✗ No</button>
+           <button class="rsvp-btn ${myRsvp==='maybe'?'maybe':''}" onclick="event.stopPropagation(); doRSVP('${ev.id}','maybe')">? Maybe</button>`
+        : `<button class="rsvp-btn ${myRsvp==='going'?'going':''}" onclick="event.stopPropagation(); doRSVP('${ev.id}','going')">✓ Going</button>
            <button class="rsvp-btn ${myRsvp==='notgoing'?'notgoing':''}" onclick="event.stopPropagation(); doRSVP('${ev.id}','notgoing')">✗ No</button>
            <button class="rsvp-btn ${myRsvp==='maybe'?'maybe':''}" onclick="event.stopPropagation(); doRSVP('${ev.id}','maybe')">? Maybe</button>`
       }
@@ -4262,16 +4272,23 @@ function buildEventDetail() {
   const isAdmin = state.user?.role === 'Administrator' || state.user?.role === 'Captain';
   const myRsvp = ev.rsvp?.[state.user?.id];
 
+  const myGuestCount = ev.rsvpGuests?.[state.user?.id] || 0;
   const rsvpSection = ev.type === 'social' ? `
     <div>
       <div class="section-title" style="font-size:16px;">Your RSVP</div>
       ${ev.cost > 0 && myRsvp === 'going'
-        ? `<div style="color:var(--green);font-size:15px;font-weight:600;padding:10px 0;">✓ You're going — payment confirmed</div>
+        ? `<div style="color:var(--green);font-size:15px;font-weight:600;padding:10px 0;">✓ You're going — payment confirmed${myGuestCount ? ` (+${myGuestCount} guest${myGuestCount > 1 ? 's' : ''})` : ''}</div>
            <div style="font-size:13px;color:var(--text-dim);">Your RSVP is locked as you've already paid for this event.</div>`
+        : ev.cost > 0
+        ? `<div class="rsvp-row">
+             <button class="rsvp-btn" onclick="openBuyTickets('${ev.id}')">🎟 Buy Tickets</button>
+             <button class="rsvp-btn ${myRsvp==='notgoing'?'notgoing':''}" onclick="doRSVP('${ev.id}','notgoing')">✗ Not going</button>
+             <button class="rsvp-btn ${myRsvp==='maybe'?'maybe':''}" onclick="doRSVP('${ev.id}','maybe')">? Maybe</button>
+           </div>
+           ${myRsvp === 'notgoing' ? `<div style="color:var(--red);font-size:14px;margin-top:8px;font-weight:600;">✗ Not going</div>` : ''}
+           ${myRsvp === 'maybe' ? `<div style="color:var(--orange);font-size:14px;margin-top:8px;font-weight:600;">? Maybe attending</div>` : ''}`
         : `<div class="rsvp-row">
-             <button class="rsvp-btn ${myRsvp==='going'?'going':''}" onclick="doRSVP('${ev.id}','going')">
-               ${ev.cost > 0 ? '✓ Going 💳' : '✓ Going'}
-             </button>
+             <button class="rsvp-btn ${myRsvp==='going'?'going':''}" onclick="doRSVP('${ev.id}','going')">✓ Going</button>
              <button class="rsvp-btn ${myRsvp==='notgoing'?'notgoing':''}" onclick="doRSVP('${ev.id}','notgoing')">✗ Not going</button>
              <button class="rsvp-btn ${myRsvp==='maybe'?'maybe':''}" onclick="doRSVP('${ev.id}','maybe')">? Maybe</button>
            </div>
@@ -4286,7 +4303,7 @@ function buildEventDetail() {
       <div class="section-title" style="font-size:16px;">RSVP Summary</div>
       <div style="display:flex;flex-direction:column;gap:8px;">
         <div class="card"><div style="color:var(--green);font-weight:700;margin-bottom:6px;">Going (${Object.values(ev.rsvp||{}).filter(v=>v==='going').length})</div>
-          ${state.users.filter(u=>ev.rsvp?.[u.id]==='going').map(u=>`<div style="font-size:14px;color:var(--text-muted);">${u.firstName} ${u.lastName}</div>`).join('') || '<div style="font-size:13px;color:var(--text-dim);">None yet</div>'}
+          ${state.users.filter(u=>ev.rsvp?.[u.id]==='going').map(u=>{ const g = ev.rsvpGuests?.[u.id] || 0; return `<div style="font-size:14px;color:var(--text-muted);">${u.firstName} ${u.lastName}${g ? ` (+${g} guest${g > 1 ? 's' : ''})` : ''}</div>`; }).join('') || '<div style="font-size:13px;color:var(--text-dim);">None yet</div>'}
         </div>
         <div class="card"><div style="color:var(--red);font-weight:700;margin-bottom:6px;">Not going (${Object.values(ev.rsvp||{}).filter(v=>v==='notgoing').length})</div>
           ${state.users.filter(u=>ev.rsvp?.[u.id]==='notgoing').map(u=>`<div style="font-size:14px;color:var(--text-muted);">${u.firstName} ${u.lastName}</div>`).join('') || '<div style="font-size:13px;color:var(--text-dim);">None yet</div>'}
@@ -4335,13 +4352,262 @@ function buildEventDetail() {
           ${ev.type === 'match' && buildMatchDescriptor(ev) ? `<div style="font-size:12px;background:var(--surface2);border-radius:8px;padding:4px 8px;display:inline-block;color:var(--text-muted);width:fit-content;">${buildMatchDescriptor(ev)}</div>` : ''}
         </div>
         ${ev.description ? `<div class="card"><div style="font-size:14px;color:var(--text-muted);line-height:1.6;">${ev.description}</div></div>` : ''}
-        ${ev.cost > 0 ? `<div style="color:var(--teal);font-size:15px;font-weight:700;">🎟 $${ev.cost.toFixed(2)} per person${ev.stripeLink ? ' — tap Going to pay online' : ''}</div>` : ''}
+        ${ev.cost > 0 ? `<div style="color:var(--teal);font-size:15px;font-weight:700;">🎟 $${ev.cost.toFixed(2)} per person</div>` : ''}
         ${rsvpSection}
         ${rsvpSummary}
         ${teamSection}
       </div>
     </div>
   </div>`;
+}
+
+// ── BUY TICKETS (Square) ───────────────────────────────────────────────────
+// Mirrors square-proxy's calculateAppFee/calculateSquareProcessingFee purely
+// for the pre-payment breakdown shown here — the server always recomputes
+// the authoritative amount from the event's price before charging.
+function estimateAppFeeCents(subtotalCents) {
+  return 100; // keep in sync with square-proxy-worker.js
+}
+function estimateSquareFeeCents(subtotalCents) {
+  return Math.round(subtotalCents * 0.0175) + 30; // keep in sync with square-proxy-worker.js
+}
+
+window.openBuyTickets = (eventId) => {
+  const ev = state.events.find(e => e.id === eventId);
+  if (!ev || !state.user) return;
+  if (!state.squareStatus?.connected) {
+    showToast("Ticket sales aren't set up for this club yet — ask an admin to connect Square.");
+    return;
+  }
+  state.buyTickets = {
+    eventId,
+    attendees: [{ query: `${state.user.firstName} ${state.user.lastName}`, profileId: state.user.id }],
+    submitting: false,
+  };
+  navigate('buytickets');
+};
+
+window.setTicketQty = (delta) => {
+  const bt = state.buyTickets;
+  if (!bt) return;
+  const next = Math.max(1, Math.min(20, bt.attendees.length + delta));
+  if (next > bt.attendees.length) {
+    while (bt.attendees.length < next) bt.attendees.push({ query: '', profileId: null });
+  } else if (next < bt.attendees.length) {
+    bt.attendees.length = next;
+  }
+  render();
+};
+
+window.updateAttendeeQuery = (idx, value) => {
+  const a = state.buyTickets?.attendees[idx];
+  if (!a) return;
+  a.query = value;
+  a.profileId = null; // retyping invalidates a previous match until re-confirmed
+  window.renderAttendeeSuggestions(idx);
+};
+
+window.renderAttendeeSuggestions = (idx) => {
+  const box = document.getElementById('attendee-suggestions-' + idx);
+  const a = state.buyTickets?.attendees[idx];
+  if (!box || !a) return;
+  if (a.profileId) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  const q = a.query.trim().toLowerCase();
+  const usedIds = new Set(state.buyTickets.attendees.filter((s, i) => i !== idx && s.profileId).map(s => s.profileId));
+  const matches = state.users.filter(u => !usedIds.has(u.id) && (!q || `${u.firstName} ${u.lastName}`.toLowerCase().includes(q)));
+  const hint = `<div style="padding:8px 12px;font-size:11px;font-style:italic;color:var(--text-dim);border-bottom:1px solid var(--border);">Not a member? Just type their name — they'll be added as a guest</div>`;
+  box.innerHTML = hint + matches.slice(0, 20).map(u =>
+    `<div onmousedown="selectAttendeeUser(${idx}, '${u.id}')" style="padding:10px 12px;font-size:14px;color:var(--text);cursor:pointer;">${u.firstName} ${u.lastName}</div>`
+  ).join('');
+  box.style.display = 'block';
+};
+
+window.selectAttendeeUser = (idx, userId) => {
+  const a = state.buyTickets?.attendees[idx];
+  const u = state.users.find(u => u.id === userId);
+  if (!a || !u) return;
+  a.profileId = userId;
+  a.query = `${u.firstName} ${u.lastName}`;
+  render();
+};
+
+window.blurAttendeeInput = (idx) => {
+  const box = document.getElementById('attendee-suggestions-' + idx);
+  if (box) { box.style.display = 'none'; box.innerHTML = ''; }
+};
+
+window.submitBuyTickets = async () => {
+  const bt = state.buyTickets;
+  const ev = state.events.find(e => e.id === bt?.eventId);
+  if (!bt || !ev || !state.user) return;
+  if (bt.attendees.some(a => !a.query.trim())) {
+    showToast('Enter a name for every ticket.');
+    return;
+  }
+  bt.submitting = true;
+  render();
+  try {
+    const res = await fetch(`${SQUARE_PROXY_URL}/create-checkout`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        club_id: CLUB_CONFIG.id,
+        profile_id: state.user.id,
+        event_id: ev.id,
+        attendees: bt.attendees.map(a => ({ name: a.query.trim(), profile_id_or_null: a.profileId })),
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.checkoutUrl) throw new Error(data.error || 'Checkout could not be created');
+    window.location.href = data.checkoutUrl;
+  } catch (e) {
+    bt.submitting = false;
+    showToast(e.message || 'Something went wrong starting checkout.');
+    render();
+  }
+};
+
+function buildBuyTickets() {
+  const bt = state.buyTickets;
+  const ev = state.events.find(e => e.id === bt?.eventId);
+  if (!bt || !ev) return `<div class="screen">${buildTopBanner({ title: 'Buy Tickets', showBack: true })}<div class="empty-state" style="margin:20px;">Event not found</div></div>`;
+
+  const ticketPriceCents = Math.round((ev.cost || 0) * 100);
+  const qty = bt.attendees.length;
+  const subtotalCents = ticketPriceCents * qty;
+  const appFeeCents = estimateAppFeeCents(subtotalCents);
+  const bookingFeeCents = appFeeCents + estimateSquareFeeCents(subtotalCents + appFeeCents);
+  const totalCents = subtotalCents + bookingFeeCents;
+  const fmt = c => `$${(c / 100).toFixed(2)}`;
+
+  const rows = bt.attendees.map((a, idx) => `
+    <div style="display:flex;gap:6px;align-items:center;">
+      <div style="width:16px;font-size:12px;color:var(--text-dim);flex-shrink:0;text-align:right;">${idx + 1}</div>
+      <div style="position:relative;flex:1;min-width:0;">
+        <input type="text" id="attendee-input-${idx}" value="${a.query.replace(/"/g, '&quot;')}" placeholder="Attendee name"
+          style="width:100%;box-sizing:border-box;background:${a.profileId ? 'rgba(0,181,181,0.16)' : 'var(--surface)'};border:1px solid ${a.profileId ? 'var(--teal)' : 'var(--border)'};border-radius:10px;padding:9px 10px;color:var(--text);font-size:13px;"
+          oninput="updateAttendeeQuery(${idx}, this.value)"
+          onfocus="renderAttendeeSuggestions(${idx})"
+          onblur="setTimeout(()=>blurAttendeeInput(${idx}), 150)"/>
+        <div id="attendee-suggestions-${idx}" style="display:none;position:absolute;top:calc(100% + 4px);left:0;right:0;background:var(--surface);border:1px solid var(--border);border-radius:10px;z-index:20;max-height:152px;overflow-y:auto;-webkit-overflow-scrolling:touch;"></div>
+      </div>
+    </div>`).join('');
+
+  return `<div class="screen">
+    ${buildTopBanner({ title: 'Buy Tickets', showBack: true })}
+    <div class="screen-scroll">
+      <div style="padding:16px;display:flex;flex-direction:column;gap:16px;">
+        <div class="event-detail-title" style="font-size:18px;">${ev.title}</div>
+
+        <div class="cost-toggle-row">
+          <span class="cost-toggle-label">Tickets</span>
+          <div style="display:flex;align-items:center;gap:14px;">
+            <button class="btn-secondary" style="width:36px;height:36px;padding:0;font-size:18px;" onclick="setTicketQty(-1)">−</button>
+            <span style="font-size:16px;font-weight:700;">${qty}</span>
+            <button class="btn-secondary" style="width:36px;height:36px;padding:0;font-size:18px;" onclick="setTicketQty(1)">+</button>
+          </div>
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:8px;">
+          <div class="section-title" style="font-size:14px;">Who's attending?</div>
+          ${rows}
+        </div>
+
+        <div class="card" style="display:flex;flex-direction:column;gap:6px;">
+          <div style="display:flex;justify-content:space-between;font-size:13px;color:var(--text-muted);"><span>${qty} ticket${qty > 1 ? 's' : ''} × ${fmt(ticketPriceCents)}</span><span>${fmt(subtotalCents)}</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:13px;color:var(--text-muted);"><span>Booking fee</span><span>${fmt(bookingFeeCents)}</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:15px;font-weight:700;color:var(--text);border-top:1px solid var(--border);padding-top:6px;margin-top:2px;"><span>Total</span><span>${fmt(totalCents)}</span></div>
+        </div>
+
+        <button class="btn-primary" ${bt.submitting ? 'disabled' : ''} onclick="submitBuyTickets()">${bt.submitting ? 'Starting checkout…' : `Continue to Payment — ${fmt(totalCents)}`}</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function buildPaymentConfirmation() {
+  const order = state.paymentOrderCache?.id === state.activePaymentOrderId ? state.paymentOrderCache : null;
+
+  if (!order) {
+    return `<div class="screen">
+      ${buildTopBanner({ title: 'Payment', showBack: true })}
+      <div class="screen-scroll">
+        <div class="empty-state" style="margin:40px 20px;">Checking payment status…</div>
+      </div>
+    </div>`;
+  }
+
+  const statusView = order.status === 'paid'
+    ? `<div style="color:var(--green);font-size:16px;font-weight:700;">✓ Payment confirmed</div>
+       <div style="font-size:13px;color:var(--text-dim);margin-top:6px;">Your ticket is booked — see the event's Going list.</div>`
+    : order.status === 'failed'
+    ? `<div style="color:var(--red);font-size:16px;font-weight:700;">✗ Payment failed</div>
+       <div style="font-size:13px;color:var(--text-dim);margin-top:6px;">No charge was completed. You can try Buy Tickets again from the event.</div>`
+    : `<div style="color:var(--orange);font-size:16px;font-weight:700;">⏳ Still processing…</div>
+       <div style="font-size:13px;color:var(--text-dim);margin-top:6px;">This can take a few seconds. We'll also notify you once it's confirmed.</div>
+       <button class="btn-secondary" style="margin-top:14px;" onclick="checkPaymentOrderStatus(true)">Check again</button>`;
+
+  return `<div class="screen">
+    ${buildTopBanner({ title: 'Payment', showBack: true })}
+    <div class="screen-scroll">
+      <div class="card" style="margin:16px;">${statusView}</div>
+      <div style="padding:0 16px;">
+        <button class="btn-primary" onclick="state.activeEventId='${order.event_id}';navigate('eventdetail');forceBackTarget('events');">Back to event</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+let _paymentPollTimer = null;
+window.checkPaymentOrderStatus = async (manual = false) => {
+  const orderId = state.activePaymentOrderId;
+  if (!orderId) return;
+  try {
+    const rows = await sb.select('orders', `id=eq.${orderId}`);
+    const order = rows[0];
+    if (order) {
+      state.paymentOrderCache = order;
+      clearTimeout(_paymentPollTimer);
+      if (order.status === 'pending') {
+        _paymentPollTimer = setTimeout(() => window.checkPaymentOrderStatus(), 3000);
+      }
+      render();
+    }
+  } catch (e) { /* transient — the manual "Check again" button covers this */ }
+};
+
+function buildAdminSquare() {
+  const status = state.squareStatus;
+  const connected = status?.connected;
+  const body = connected
+    ? `<div class="square-status-box">
+         <div class="square-status-label">✓ Connected</div>
+         <div class="square-status-text">Merchant ID: ${status.merchantId || '—'}<br/>Location ID: ${status.locationId || '—'}</div>
+       </div>`
+    : `<div class="square-status-box" style="border-color:#ff8c0055;">
+         <div class="square-status-label" style="color:var(--orange);">Not connected</div>
+         <div class="square-status-text">Connect your club's Square account to start selling event tickets.</div>
+       </div>
+       <button class="btn-primary" style="margin-top:14px;" onclick="startSquareConnect()">Connect Square</button>`;
+
+  return `<div class="screen">
+    ${buildTopBanner({ title: 'Payments (Square)', showBack: true })}
+    <div class="screen-scroll">
+      <div style="padding:16px;">${body}</div>
+    </div>
+  </div>`;
+}
+
+window.startSquareConnect = () => {
+  if (!sb._token) { showToast('Please log in again first.'); return; }
+  window.location.href = `${SQUARE_PROXY_URL}/oauth/start?club_id=${encodeURIComponent(CLUB_CONFIG.id)}&token=${encodeURIComponent(sb._token)}`;
+};
+
+async function fetchSquareStatus() {
+  try {
+    const res = await fetch(`${SQUARE_PROXY_URL}/oauth/status?club_id=${encodeURIComponent(CLUB_CONFIG.id)}`);
+    state.squareStatus = await res.json();
+  } catch (e) { state.squareStatus = { connected: false }; }
 }
 
 // ── TIME SELECT HELPER (15-min intervals, drum-style) ─────────────────────
@@ -4480,26 +4746,19 @@ function buildCreateEvent() {
       </div>
       ${f.hasCost ? `
         <div class="input-group">
-          <label class="input-label">Cost per person ($)</label>
+          <label class="input-label">Ticket price per person ($)</label>
           <input class="input-field" id="ce-cost" type="number" min="0" step="0.50"
             placeholder="e.g. 25.00" value="${f.cost}"
-            oninput="saveCEField('cost', this.value); state.createEventForm.stripeLink=null;"/>
+            oninput="saveCEField('cost', this.value)"/>
         </div>
-        ${f.stripeLink
-          ? `<div class="stripe-link-box">
-               <div class="stripe-link-label">💳 Payment Link</div>
-               <div class="stripe-link-url">${f.stripeLink}</div>
-               <div style="display:flex;gap:8px;margin-top:8px;">
-                 <input class="input-field" style="flex:1;font-size:12px;" value="${f.stripeLink}"
-                   oninput="saveCEField('stripeLink', this.value)" placeholder="https://..."/>
-                 <button class="btn-secondary" style="padding:8px 12px;font-size:12px;white-space:nowrap;" onclick="saveCEField('stripeLink',null);render()">Remove</button>
-               </div>
+        ${state.squareStatus?.connected
+          ? `<div class="square-status-box">
+               <div class="square-status-label">🎟 Square Checkout</div>
+               <div class="square-status-text">Attendees will pay through Square when they tap Buy Tickets — no link to paste.</div>
              </div>`
-          : `<div>
-               <label class="input-label">💳 Payment Link <span style="color:var(--text-dim);font-weight:400;">(optional — Stripe, Square, PayPal etc.)</span></label>
-               <input class="input-field" placeholder="Paste your payment link here e.g. https://buy.stripe.com/..."
-                 value=""
-                 oninput="saveCEField('stripeLink', this.value || null)"/>
+          : `<div class="square-status-box" style="border-color:#ff8c0055;">
+               <div class="square-status-label" style="color:var(--orange);">⚠ Square not connected</div>
+               <div class="square-status-text">An admin needs to connect Square (Admin menu) before this event can sell tickets.</div>
              </div>`}
       ` : ''}
     </div>`;
@@ -5448,6 +5707,7 @@ function buildMenu() {
     { icon: icons.shop,      label: 'Shop',             screen: 'shop' },
     { icon: icons.settings,  label: 'Settings',         screen: 'settings' },
     ...(isAdmin ? [{ icon: icons.users, label: 'User List', screen: 'userlist' }] : []),
+    ...(isAdmin ? [{ icon: '🎟',        label: 'Payments (Square)', screen: 'adminsquare' }] : []),
   ];
 
   const rows = items.map(item => `
@@ -6605,7 +6865,7 @@ window.openSelectPlayers = (id) => {
 window.doRSVP = (eventId, status) => {
   const ev = state.events.find(e => e.id === eventId);
   const current = ev?.rsvp?.[state.user?.id];
-  handleRSVP(eventId, status, current, ev?.stripeLink);
+  handleRSVP(eventId, status, current);
 };
 
 // Persist a single create-event field into state immediately (no full re-render)
@@ -6759,14 +7019,9 @@ function generatePlaceholderEventImage(prompt) {
 window.toggleEventCost = () => {
   state.createEventForm.hasCost = !state.createEventForm.hasCost;
   if (!state.createEventForm.hasCost) {
-    state.createEventForm.stripeLink = null;
     state.createEventForm.cost = '';
   }
   render();
-};
-
-window.generateStripeLink = () => {
-  showToast('Paste your Stripe Payment Link in the field below.');
 };
 
 window.toggleNotif = (key) => {
@@ -6809,7 +7064,6 @@ window.openEditEvent = (id) => {
     grade:       ev.grade  || '',
     homeAway:    ev.homeAway || 'Home',
     image:       ev.image       || null,
-    stripeLink:  ev.stripeLink  || null,
     notifications: ev.notifications
       ? { ...ev.notifications }
       : { immediate: false, weekly: false, oneWeekBefore: false, oneDayBefore: false },
@@ -8238,6 +8492,11 @@ function applyKeyboardResize() {
 // The Worker holds your API keys securely and avoids CORS issues.
 const ONESIGNAL_WORKER_URL = 'https://onesignal-proxy.thomsonseth.workers.dev';
 
+// ── SQUARE TICKET PAYMENTS (square-proxy Cloudflare Worker) ──────────────
+// Replace with your deployed square-proxy URL after setup (see manual
+// Cloudflare steps). Holds Square OAuth/API credentials server-side.
+const SQUARE_PROXY_URL = 'https://square-proxy.thomsonseth.workers.dev';
+
 // Request permission from the user after they log in
 async function requestNotificationPermission() {
   try {
@@ -8403,10 +8662,13 @@ async function pollAll() {
         // Refresh RSVPs
         const rsvps = await sb.select('rsvps', '');
         if (Array.isArray(rsvps)) {
-          state.events.forEach(e => e.rsvp = {});
+          state.events.forEach(e => { e.rsvp = {}; e.rsvpGuests = {}; });
           rsvps.forEach(r => {
             const ev = state.events.find(e => e.id === r.event_id);
-            if (ev) ev.rsvp[r.user_id] = r.status;
+            if (ev) {
+              ev.rsvp[r.user_id] = r.status;
+              if (r.guest_count) ev.rsvpGuests[r.user_id] = r.guest_count;
+            }
           });
           changed = true;
         }
@@ -8780,6 +9042,18 @@ function handleDeepLink(hashOverride) {
     state.activeTab = 'menu';
     navigate('userlist');
     forceBackTarget('menu');
+  } else if (screen === 'paymentconfirmation' && id) {
+    state.activePaymentOrderId = id;
+    state.paymentOrderCache = null;
+    navigate('paymentconfirmation');
+    forceBackTarget('home');
+    checkPaymentOrderStatus();
+  } else if (screen === 'squareconnected') {
+    state.activeTab = 'menu';
+    fetchSquareStatus();
+    navigate('adminsquare');
+    forceBackTarget('menu');
+    showToast('Square connected!');
   }
   // Clear the hash so it doesn't re-navigate on refresh (only relevant when
   // we actually came from the address bar's own hash).
