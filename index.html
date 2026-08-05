@@ -2982,7 +2982,7 @@ function blankCreateEventForm() {
   };
 }
 
-function handleCreateEvent() {
+async function handleCreateEvent() {
   const f = state.createEventForm;
   const isMatch = f.category === 'match';
 
@@ -3009,7 +3009,10 @@ function handleCreateEvent() {
       ev.location    = f.location;
       ev.description = f.description;
       ev.cost        = f.hasCost ? parseFloat(f.cost) || 0 : 0;
-      if (f.image) ev.image = f.image;
+      if (f.image) {
+        try { ev.image = await resolveImageForUpload(f.image, `events/${ev.id}`); }
+        catch (e) { showToast('Image upload failed — keeping the previous image.'); }
+      }
       ev.notifications = { ...f.notifications };
       // Persist to Supabase
       sb.update('events', eventToRow(ev), { id: ev.id });
@@ -3036,6 +3039,11 @@ function handleCreateEvent() {
     // Home's presented-match card.
   } else {
     // ── CREATE new event ──
+    let eventImage = f.image || f.aiImage || null;
+    if (eventImage) {
+      try { eventImage = await resolveImageForUpload(eventImage, `events/new-${Date.now()}`); }
+      catch (e) { showToast('Image upload failed — creating the event without it.'); eventImage = null; }
+    }
     const newEv = {
       id: 'e' + Date.now(),
       type: f.category || 'social',
@@ -3047,7 +3055,7 @@ function handleCreateEvent() {
       location: f.location,
       description: f.description,
       cost: f.hasCost ? parseFloat(f.cost) || 0 : 0,
-      image: f.image || f.aiImage || null,
+      image: eventImage,
       notifications: { ...f.notifications },
       rsvp: {},
       rsvpGuests: {},
@@ -6888,6 +6896,47 @@ window.setCEImageTab = (tab) => {
   render();
 };
 
+// ── Image upload to Supabase Storage ──────────────────────────────────────
+// Every image in this app used to be stored as a base64 data: URI directly
+// in its row (avatar, event photo, group photo, ...). That meant every poll
+// or load that touched the row re-transferred the whole image regardless of
+// whether it changed, images could never be browser-cached (they're JSON,
+// not a real URL), and stored size counted against Supabase's database-size
+// cap on top of its egress cap. This uploads to the 'club-images' Storage
+// bucket instead and returns a real, cacheable, public URL — callers store
+// that URL in place of the old base64 string; nothing downstream needs to
+// change since an <img src> doesn't care whether it's a data: URI or a URL.
+async function uploadImageToStorage(dataUrl, pathPrefix) {
+  const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+  if (!match) throw new Error('Not a data: URI');
+  const contentType = match[1];
+  const binary = atob(match[2]);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const ext = (contentType.split('/')[1] || 'jpg').replace('svg+xml', 'svg');
+  const path = `${pathPrefix}-${Date.now()}.${ext}`;
+  const res = await fetch(`${SUPABASE_URL}/storage/v1/object/club-images/${path}`, {
+    method: 'POST',
+    headers: {
+      apikey: SUPABASE_ANON,
+      Authorization: `Bearer ${sb._token || SUPABASE_ANON}`,
+      'Content-Type': contentType,
+      'x-upsert': 'true',
+    },
+    body: bytes,
+  });
+  if (!res.ok) throw new Error(`Image upload failed: ${res.status}`);
+  return `${SUPABASE_URL}/storage/v1/object/public/club-images/${path}`;
+}
+
+// Passes an already-uploaded URL straight through (the common case when
+// editing something without changing its image); only actually uploads if
+// what's staged is still a freshly-picked data: URI.
+async function resolveImageForUpload(dataUrlOrUrl, pathPrefix) {
+  if (!dataUrlOrUrl || !dataUrlOrUrl.startsWith('data:')) return dataUrlOrUrl || null;
+  return uploadImageToStorage(dataUrlOrUrl, pathPrefix);
+}
+
 // ── Image crop & resize helper ───────────────────────────────────────────
 // Crops image to the given aspect ratio (centred) and resizes to maxW x maxH
 function cropAndResizeImage(file, aspectRatio, maxW, maxH, callback) {
@@ -7017,8 +7066,15 @@ function generatePlaceholderEventImage(prompt) {
     <text x="200" y="148" text-anchor="middle" fill="white" font-size="13" font-weight="700" font-family="Arial,sans-serif" opacity="0.9">${words}</text>
     <text x="200" y="166" text-anchor="middle" fill="${c[2]}" font-size="9" font-family="Arial,sans-serif" opacity="0.7">AI GENERATED IMAGE</text>
   </svg>`;
-  const blob = new Blob([svg], { type: 'image/svg+xml' });
-  return URL.createObjectURL(blob);
+  // A blob: URL only resolves in the tab that created it — it'd already show
+  // broken for every other member, and again for the creator after their
+  // next reload, since it can't survive being persisted to Supabase and
+  // fetched back later. Base64 data: URI instead — same format every other
+  // image source in the app produces (canvas.toDataURL, FileReader), so it
+  // uploads through uploadImageToStorage the same way. unescape/encodeURIComponent
+  // is the standard workaround for btoa() otherwise throwing on non-Latin1
+  // characters (the prompt text embedded in the SVG could contain any unicode).
+  return 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svg)));
 }
 
 window.toggleEventCost = () => {
@@ -7259,16 +7315,12 @@ window.sendImageMessage = (event) => {
   const file = event.target.files[0];
   if (!file) return;
   const reader = new FileReader();
-  reader.onload = (e) => {
+  reader.onload = async (e) => {
     const thread = state.messages.find(m => m.id === state.activeChatId);
     if (!thread || !state.user) return;
-    thread.messages.push({
-      id: 'msg' + Date.now(),
-      from: state.user.id,
-      image: e.target.result,
-      text: '',
-      ts: Date.now(),
-    });
+    const dataUrl = e.target.result;
+    const tempId = 'msg' + Date.now();
+    thread.messages.push({ id: tempId, from: state.user.id, image: dataUrl, text: '', ts: Date.now() });
     thread.participants.forEach(pid => {
       if (pid !== state.user.id) thread.unread[pid] = (thread.unread[pid] || 0) + 1;
     });
@@ -7277,6 +7329,36 @@ window.sendImageMessage = (event) => {
       const el = document.getElementById('chat-messages-container');
       if (el) el.scrollTop = el.scrollHeight;
     }, 30);
+
+    // This previously never called sb.insert() at all — the image only ever
+    // existed in local memory, so it vanished on reload and no other
+    // participant ever actually received it. Fixed here since it's the same
+    // upload path being touched for the Storage migration anyway.
+    try {
+      const wasPendingId = thread.id;
+      if (thread.isPending) {
+        const threadRows = await sb.insert('threads', { is_group: thread.isGroup, name: thread.name, participants: thread.participants });
+        const realThreadId = Array.isArray(threadRows) && threadRows[0]?.id ? threadRows[0].id : thread.id;
+        delete thread.isPending;
+        thread.id = realThreadId;
+        if (state.activeChatId === wasPendingId) state.activeChatId = realThreadId;
+      }
+
+      const url = await uploadImageToStorage(dataUrl, `messages/${thread.id}`);
+      const rows = await sb.insert('messages', { thread_id: thread.id, from_id: state.user.id, text: '', image_url: url, is_system: false });
+      const realId = Array.isArray(rows) && rows[0]?.id ? rows[0].id : null;
+      const local = thread.messages.find(m => m.id === tempId);
+      if (local) { local.id = realId || local.id; local.image = url; }
+      render();
+
+      const senderName = state.user.nickname || state.user.firstName;
+      const recipients = thread.participants.filter(pid => pid !== state.user.id);
+      if (realId && recipients.length > 0 && await claimReminder(`msg_${realId}`)) {
+        sendPushNotificationToUsers(`Message from ${senderName}`, '📷 Photo', `${CLUB_CONFIG.appUrl}/#screen=chat&id=${thread.id}`, recipients);
+      }
+    } catch (err) {
+      showToast('Photo failed to send — try again.');
+    }
   };
   reader.readAsDataURL(file);
 };
@@ -7302,14 +7384,19 @@ window.handleGroupAvatarUpload = (event) => {
   const thread = state.messages.find(m => m.id === state.activeChatId);
   const file = event.target.files[0];
   if (!file || !thread) return;
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    thread.image = e.target.result;
-    sb.update('threads', { image_url: e.target.result }, { id: thread.id });
-    showToast('Group photo updated!');
+  cropAndResizeImage(file, 1, 500, 500, async (dataUrl) => {
+    thread.image = dataUrl; // optimistic local preview while the upload is in flight
     render();
-  };
-  reader.readAsDataURL(file);
+    try {
+      const url = await uploadImageToStorage(dataUrl, `threads/${thread.id}`);
+      thread.image = url;
+      sb.update('threads', { image_url: url }, { id: thread.id });
+      showToast('Group photo updated!');
+      render();
+    } catch (e) {
+      showToast('Photo upload failed — try again.');
+    }
+  });
 };
 
 window.removeMemberFromGroup = (userId) => {
@@ -7522,30 +7609,36 @@ window.chatKeyDown = (e) => {
 
 window.handleAvatarUpload = (event) => {
   const file = event.target.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    if (state.user) {
-      state.user.avatar = e.target.result;
+  if (!file || !state.user) return;
+  cropAndResizeImage(file, 1, 400, 400, async (dataUrl) => {
+    state.user.avatar = dataUrl; // optimistic local preview while the upload is in flight
+    render();
+    try {
+      const url = await uploadImageToStorage(dataUrl, `avatars/${state.user.id}`);
+      state.user.avatar = url;
       const u = state.users.find(u => u.id === state.user.id);
-      if (u) u.avatar = e.target.result;
-      // Persist avatar to Supabase immediately
-      sb.update('profiles', { avatar_url: e.target.result }, { id: state.user.id });
+      if (u) u.avatar = url;
+      sb.update('profiles', { avatar_url: url }, { id: state.user.id });
       render();
+    } catch (e) {
+      showToast('Avatar upload failed — try again.');
     }
-  };
-  reader.readAsDataURL(file);
+  });
 };
 
 window.handleJoinAvatarUpload = (event) => {
   const file = event.target.files[0];
   if (!file) return;
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    state.joinForm.avatarPreview = e.target.result;
+  cropAndResizeImage(file, 1, 400, 400, async (dataUrl) => {
+    state.joinForm.avatarPreview = dataUrl; // optimistic preview while the upload is in flight
     render();
-  };
-  reader.readAsDataURL(file);
+    try {
+      state.joinForm.avatarPreview = await uploadImageToStorage(dataUrl, `avatars/${state.user?.id || 'pending'}`);
+      render();
+    } catch (e) {
+      showToast('Photo upload failed — try again.');
+    }
+  });
 };
 
 window.startEditProfile = () => {
@@ -7653,7 +7746,7 @@ window.deleteAnnouncement = async (id) => {
   try { await sb.delete('announcements', { id }); } catch(e) {}
 };
 
-window.publishAnnouncement = () => {
+window.publishAnnouncement = async () => {
   const f = state.createAnnouncementForm;
   const editId = state.editingAnnouncementId;
   const title = (document.getElementById('ann-title')?.value || f.title).trim();
@@ -7669,6 +7762,12 @@ window.publishAnnouncement = () => {
     state.error = '';
   };
 
+  let annImage = f.image || null;
+  if (annImage) {
+    try { annImage = await resolveImageForUpload(annImage, `announcements/${editId || 'new-' + Date.now()}`); }
+    catch (e) { showToast('Image upload failed — publishing without it.'); annImage = null; }
+  }
+
   if (editId) {
     // ── EDIT existing announcement ────────────────────────────────────
     const idx = state.announcements.findIndex(a => a.id === editId);
@@ -7677,13 +7776,13 @@ window.publishAnnouncement = () => {
         ...state.announcements[idx],
         title,
         body,
-        image: f.image || null,
+        image: annImage,
       };
     }
     sb.update('announcements', {
       title,
       body,
-      image_url: f.image || null,
+      image_url: annImage,
     }, { id: editId });
     if (f.sendNotification) {
       sendPushNotification(
@@ -7709,7 +7808,7 @@ window.publishAnnouncement = () => {
     const newAnn = {
       id: 'a' + Date.now(),
       title, body,
-      image: f.image || null,
+      image: annImage,
       date: today,
       author: u.nickname || u.firstName,
       recipients: f.recipients,
@@ -7720,7 +7819,7 @@ window.publishAnnouncement = () => {
       title, body,
       author_id: u.id,
       author_name: u.nickname || u.firstName,
-      image_url: f.image || null,
+      image_url: annImage,
       recipients: f.recipients,
     }).then(rows => {
       const annId = Array.isArray(rows) && rows[0]?.id ? rows[0].id : null;
