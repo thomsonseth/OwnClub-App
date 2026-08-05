@@ -2154,6 +2154,11 @@ async function loadAppData(silent = false) {
           unread,
         };
       });
+      // This load just fetched full history for every thread we're in — tell
+      // pollMessages() not to redundantly re-fetch all of it again on its
+      // very next cycle; only what's new/changed from here on.
+      threadsFiltered.forEach(t => _fullyLoadedThreadIds.add(t.id));
+      _msgWatermark = new Date().toISOString();
     } else {
       state.messages = [];
     }
@@ -7434,6 +7439,13 @@ window.openChat = (id) => {
   // 5s poll tick — covers arriving here via a notification tap, where the
   // message that triggered the notification may not be loaded yet.
   pollMessages().then(() => setTimeout(scrollToBottom, 50));
+  // Thread photo is excluded from the recurring poll (see pollMessages) —
+  // refresh it here instead, once, whenever this specific chat is opened.
+  sb.select('threads', `id=eq.${id}&select=image_url`).then(rows => {
+    const img = rows?.[0]?.image_url ?? null;
+    const thread = state.messages.find(m => m.id === id);
+    if (thread && thread.image !== img) { thread.image = img; render(); }
+  });
 };
 
 window.handleNewMsg = () => handleNewMessage();
@@ -8602,6 +8614,12 @@ let _lastFacebookPoll = 0;
 let _lastReminderCheck = 0;
 // Tracks which reminder keys have already fired this session: Set of strings like `${eventId}_oneDayBefore`
 const _firedReminders = new Set();
+// Messages poll watermark — see pollMessages(). null until the first full
+// load; after that, only messages created or reacted-to after this ISO
+// timestamp need fetching. Threads we've fully loaded at least once this
+// session (so their history never needs re-fetching, only what's new).
+let _msgWatermark = null;
+const _fullyLoadedThreadIds = new Set();
 
 // Cross-device reminder dedupe. Every online device runs this same 5-minute
 // check, so without a shared claim, each one would send its own push.
@@ -8632,9 +8650,15 @@ async function pollAll() {
   if (now - _lastEventPoll > 10000) {
     _lastEventPoll = now;
     try {
-      const evRows = await sb.select('events', 'order=date.asc');
+      // image_url excluded here on purpose — it can be a multi-hundred-KB
+      // base64 blob and this poll runs every 10s for as long as the app is
+      // open. The diff below never even reads .image for events we already
+      // know about, so it was pure wasted bandwidth; genuinely new events
+      // get their image fetched separately, once, just below.
+      const evRows = await sb.select('events', 'order=date.asc&select=id,type,title,date,time,finish_time,finish_date,location,description,cost,grade,grade_id,round,home_team,away_team,gender,format,home_away,cancelled,cancel_note,from_schedule,reminder,play_hq_id,notifications');
       if (Array.isArray(evRows)) {
         const existingIds = new Set(state.events.map(e => e.id));
+        const newlyAddedIds = [];
         let changed = false;
 
         evRows.forEach(r => {
@@ -8645,6 +8669,7 @@ async function pollAll() {
             // unread logic: no point flagging something as unseen when
             // they're already looking at the list it'll show up in).
             state.events.push(mapped);
+            newlyAddedIds.push(r.id);
             if (state.activeTab !== 'events') state.newEventIds.add(r.id);
             changed = true;
           } else {
@@ -8658,6 +8683,16 @@ async function pollAll() {
             }
           }
         });
+
+        if (newlyAddedIds.length) {
+          const imgRows = await sb.select('events', `id=in.(${newlyAddedIds.map(id => `"${id}"`).join(',')})&select=id,image_url`);
+          if (Array.isArray(imgRows)) {
+            imgRows.forEach(r => {
+              const ev = state.events.find(e => e.id === r.id);
+              if (ev) ev.image = r.image_url || null;
+            });
+          }
+        }
 
         // Refresh RSVPs
         const rsvps = await sb.select('rsvps', '');
@@ -8682,7 +8717,10 @@ async function pollAll() {
   if (now - _lastAnnPoll > 15000) {
     _lastAnnPoll = now;
     try {
-      const annRows = await sb.select('announcements', 'order=created_at.desc');
+      // image_url excluded — same reasoning as the events poll above. Every
+      // announcement we already know about keeps its cached image; only a
+      // genuinely new announcement triggers the small follow-up fetch below.
+      const annRows = await sb.select('announcements', 'order=created_at.desc&select=id,title,body,author_id,author_name,recipients,created_at');
       if (Array.isArray(annRows)) {
         // Load persisted deleted IDs from localStorage
         let deletedIds = new Set();
@@ -8690,17 +8728,29 @@ async function pollAll() {
           const stored = JSON.parse(localStorage.getItem('clubapp_deleted_anns') || '[]');
           deletedIds = new Set(stored);
         } catch(e) {}
+        const existingById = new Map(state.announcements.map(a => [a.id, a]));
         // Full reconcile — rebuild from Supabase, skipping deleted IDs
         const newList = annRows
           .filter(a => !deletedIds.has(a.id))
-          .map(a => ({
-            id: a.id, title: a.title, body: a.body,
-            image: a.image_url || null,
-            date: a.created_at ? a.created_at.slice(0,10) : '',
-            author: a.author_id ? (a.author_name || 'Admin') : 'Deleted user',
-            recipients: a.recipients || 'all',
-          }));
+          .map(a => {
+            const prev = existingById.get(a.id);
+            return {
+              id: a.id, title: a.title, body: a.body,
+              image: prev ? prev.image : undefined, // filled in below if genuinely new
+              date: a.created_at ? a.created_at.slice(0,10) : '',
+              author: a.author_id ? (a.author_name || 'Admin') : 'Deleted user',
+              recipients: a.recipients || 'all',
+            };
+          });
         const changed = JSON.stringify(newList.map(a=>a.id)) !== JSON.stringify(state.announcements.map(a=>a.id));
+
+        const freshIds = newList.filter(a => a.image === undefined).map(a => a.id);
+        if (freshIds.length) {
+          const imgRows = await sb.select('announcements', `id=in.(${freshIds.map(id => `"${id}"`).join(',')})&select=id,image_url`);
+          const imgById = new Map(Array.isArray(imgRows) ? imgRows.map(r => [r.id, r.image_url || null]) : []);
+          newList.forEach(a => { if (a.image === undefined) a.image = imgById.get(a.id) || null; });
+        }
+
         state.announcements = newList;
         if (changed && !isUserTyping() && state.screen !== 'home') render();
       }
@@ -8800,7 +8850,14 @@ async function pollAll() {
 async function pollMessages() {
   if (!state.user || !sb._token) return;
   try {
-    const threads = await sb.select('threads', 'order=created_at.asc');
+    // image_url excluded here on purpose — this poll runs every ~5s for as
+    // long as the app is open, and a group chat's photo can be multi-MB.
+    // Re-downloading that on every cycle regardless of whether it changed
+    // was the single biggest source of this project's Supabase egress
+    // usage. New threads fetch their image once (below); an existing
+    // thread's photo is refreshed only when that specific chat is opened
+    // (see openChat()), not live via this poll — an intentional trade-off.
+    const threads = await sb.select('threads', 'order=created_at.asc&select=id,name,is_group,participants,created_at');
     if (!Array.isArray(threads)) return;
 
     const myThreads = threads.filter(t =>
@@ -8829,12 +8886,38 @@ async function pollMessages() {
       return;
     }
 
-    const threadIds = myThreads.map(t => `"${t.id}"`).join(',');
-    const msgs = await sb.select('messages', `thread_id=in.(${threadIds})&order=created_at.asc`);
-    if (!Array.isArray(msgs)) return;
+    // Fetching every message in every thread, in full, on every 5s cycle used
+    // to be the single largest source of this project's Supabase egress —
+    // that payload only grows as chat history grows, forever, regardless of
+    // whether anything actually happened. Instead: a thread we've never seen
+    // before gets its full history once; a thread we've already loaded only
+    // needs what's new or changed (a message created, or a reaction added to
+    // an existing one — the `updated_at` trigger on `messages` is what makes
+    // the latter cheap to ask for) since our last successful poll.
+    const pollStartedAt = new Date().toISOString();
+    const freshThreadIds = myThreads.filter(t => !_fullyLoadedThreadIds.has(t.id)).map(t => t.id);
+    const knownThreadIds = myThreads.filter(t => _fullyLoadedThreadIds.has(t.id)).map(t => t.id);
+
+    let msgs = [];
+    if (freshThreadIds.length) {
+      const idsQ = freshThreadIds.map(id => `"${id}"`).join(',');
+      const rows = await sb.select('messages', `thread_id=in.(${idsQ})&order=created_at.asc`);
+      if (Array.isArray(rows)) msgs = msgs.concat(rows);
+    }
+    if (knownThreadIds.length) {
+      const idsQ = knownThreadIds.map(id => `"${id}"`).join(',');
+      const query = _msgWatermark
+        ? `thread_id=in.(${idsQ})&or=(created_at.gt.${_msgWatermark},updated_at.gt.${_msgWatermark})&order=created_at.asc`
+        : `thread_id=in.(${idsQ})&order=created_at.asc`; // no watermark yet — fail safe to a full fetch rather than silently skipping
+      const rows = await sb.select('messages', query);
+      if (Array.isArray(rows)) msgs = msgs.concat(rows);
+    }
+    freshThreadIds.forEach(id => _fullyLoadedThreadIds.add(id));
+    _msgWatermark = pollStartedAt;
 
     const newMessages = []; // collect every new message this poll cycle, not just the first
     const newReactions = []; // collect every newly-added reaction this poll cycle
+    const newThreadIds = []; // brand-new threads this cycle — need their image fetched once, separately
 
     myThreads.forEach(t => {
       const threadMsgs = msgs.filter(m => m.thread_id === t.id);
@@ -8850,16 +8933,17 @@ async function pollMessages() {
 
       if (!existing) {
         existing = {
-          id: t.id, isGroup: t.is_group, name: t.name || null, image: t.image_url || null,
+          id: t.id, isGroup: t.is_group, name: t.name || null, image: null, // image fetched separately below
           participants: t.participants || [], messages: [],
           unread: Object.fromEntries((t.participants || []).map(p => [p, 0])),
         };
         state.messages.unshift(existing);
+        newThreadIds.push(t.id);
       } else {
         // Sync thread-level fields another participant/admin may have changed
-        // (group name, group photo, membership) since our last poll.
+        // (group name, membership) since our last poll. Photo is deliberately
+        // not synced here — see the image_url comment above.
         if (existing.name !== (t.name || null)) { existing.name = t.name || null; gotNew = true; }
-        if (existing.image !== (t.image_url || null)) { existing.image = t.image_url || null; gotNew = true; }
         if (JSON.stringify(existing.participants) !== JSON.stringify(t.participants || [])) {
           existing.participants = t.participants || [];
           gotNew = true;
@@ -8936,6 +9020,17 @@ async function pollMessages() {
         }
       });
     });
+
+    if (newThreadIds.length) {
+      const imgRows = await sb.select('threads', `id=in.(${newThreadIds.map(id => `"${id}"`).join(',')})&select=id,image_url`);
+      if (Array.isArray(imgRows)) {
+        imgRows.forEach(r => {
+          const th = state.messages.find(m => m.id === r.id);
+          if (th) th.image = r.image_url || null;
+        });
+        if (imgRows.length) gotNew = true;
+      }
+    }
 
     // Every participant's client detects the same new message/reaction
     // independently. claimReminder ensures only one of them actually sends
