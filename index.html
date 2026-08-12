@@ -4375,14 +4375,11 @@ function buildEventDetail() {
 }
 
 // ── BUY TICKETS (Square) ───────────────────────────────────────────────────
-// Mirrors square-proxy's calculateAppFee/calculateSquareProcessingFee purely
-// for the pre-payment breakdown shown here — the server always recomputes
-// the authoritative amount from the event's price before charging.
+// Mirrors square-proxy's calculateAppFee purely for the pre-payment breakdown
+// shown here — the server always recomputes the authoritative amount from
+// the event's price before charging.
 function estimateAppFeeCents(subtotalCents) {
-  return 100; // keep in sync with square-proxy-worker.js
-}
-function estimateSquareFeeCents(subtotalCents) {
-  return Math.round(subtotalCents * 0.0175) + 30; // keep in sync with square-proxy-worker.js
+  return subtotalCents >= 5000 ? Math.round(subtotalCents * 0.02) : 99; // keep in sync with square-proxy-worker.js
 }
 
 window.openBuyTickets = (eventId) => {
@@ -4489,7 +4486,7 @@ function buildBuyTickets() {
   const qty = bt.attendees.length;
   const subtotalCents = ticketPriceCents * qty;
   const appFeeCents = estimateAppFeeCents(subtotalCents);
-  const bookingFeeCents = appFeeCents + estimateSquareFeeCents(subtotalCents + appFeeCents);
+  const bookingFeeCents = appFeeCents;
   const totalCents = subtotalCents + bookingFeeCents;
   const fmt = c => `$${(c / 100).toFixed(2)}`;
 
