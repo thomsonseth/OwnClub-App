@@ -1,0 +1,42 @@
+# playhq-sync — PlayHQ fixture proxy + nightly auto-sync for one club's
+# OwnClub App deployment.
+#
+# ── PER-CLUB SETUP ────────────────────────────────────────────────────────
+# One Worker per club. To onboard a new club (e.g. BUCC):
+#   1. Copy this file, change `name` to a unique value (playhq-sync-<club>)
+#      and edit every value in [vars] for that club.
+#   2. Set the secrets below for that club:
+#        wrangler secret put <NAME> --config <this file>
+#   3. Point the club app's CLUB_CONFIG.playhqSyncUrl at the new Worker URL.
+#
+# Secrets (never in this file):
+#   PLAYHQ_API_KEY            — issued by PlayHQ support for the club
+#   PLAYHQ_TENANT             — sport tenant code, e.g. "ca" (Cricket Aus), "bv" (Basketball Vic)
+#   PLAYHQ_ORG_ID             — the club's full PlayHQ organisation UUID (primary
+#                               club matcher; find it via the club's public page API traffic)
+#   SUPABASE_URL              — the club's Supabase project URL
+#   SUPABASE_SERVICE_ROLE_KEY — the club's Supabase service-role key
+#   ADMIN_SECRET              — random string gating /sync and /debug
+#   PLAYHQ_SEASON_ID          — (optional legacy fallback when PLAYHQ_ORG_ID unset)
+#
+# `wrangler deploy` never touches secrets — only `wrangler secret put` does.
+
+name = "playhq-sync"
+main = "playhq-sync-worker.js"
+compatibility_date = "2026-07-23"
+compatibility_flags = ["nodejs_compat"]
+
+[triggers]
+crons = ["0 3 * * *"]
+
+[observability]
+enabled = true
+
+[vars]
+# Per-club, but not secret.
+# PLAYHQ_CLUB_NAME: name-substring fallback for matching the club's teams when
+# PLAYHQ_ORG_ID is unset — use the club name AS IT APPEARS ON PLAYHQ, which may
+# differ from the app's branding (e.g. "Bundoora United", not "BUCC").
+PLAYHQ_CLUB_NAME = "Laurimar"
+ONESIGNAL_PROXY_URL = "https://onesignal-proxy.thomsonseth.workers.dev"
+APP_URL = "https://laurimar-power.netlify.app"
