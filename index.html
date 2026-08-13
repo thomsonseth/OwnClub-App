@@ -516,6 +516,34 @@
     color: var(--text-dim);
     letter-spacing: 0.5px;
   }
+  /* Inline nav — chevrons sit either side of the card instead of on their own
+     row, so the section stays compact. The back chevron only appears once
+     you've stepped forward, keeping the default (most-seen) state clean. */
+  .arrow-slider-inline {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 10px;
+  }
+  /* width:auto overrides the base card's width:100% so flex sizing wins */
+  .arrow-slider-inline .arrow-slider-card { flex: 1; min-width: 0; width: auto; }
+  .inline-nav-btn {
+    width: 28px;
+    height: 44px;
+    flex-shrink: 0;
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--accent);
+    border-radius: 8px;
+    transition: background 0.15s, opacity 0.15s;
+  }
+  .inline-nav-btn:active { background: var(--surface2); }
+  .inline-nav-btn.hidden { visibility: hidden; pointer-events: none; }
 
   /* ── HORIZONTAL SLIDERS ── */
   .h-slider {
@@ -3868,6 +3896,30 @@ function buildHome() {
   const followableTeams = clubTeams();
   const upcomingSocials = state.events.filter(e => e.type === 'social' && isUpcoming(e.date)).sort((a,b)=>a.date>b.date?1:-1);
 
+  // Compact slider — chevrons flank the card rather than sitting on their own
+  // row with a counter, so the section takes less vertical space. Back only
+  // appears once you've stepped forward.
+  function buildInlineSlider(items, idPrefix, cardBuilder, emptyMsg) {
+    if (items.length === 0) return `<div class="empty-state">${emptyMsg}</div>`;
+    const safeIdx = Math.min(state[idPrefix + 'Idx'] || 0, items.length - 1);
+    const hasPrev = safeIdx > 0;
+    const hasNext = safeIdx < items.length - 1;
+    const chevron = (dir) => `<polyline points="${dir < 0 ? '15 18 9 12 15 6' : '9 18 15 12 9 6'}"/>`;
+    const btn = (dir, enabled) => `
+      <button class="inline-nav-btn ${enabled ? '' : 'hidden'}" aria-label="${dir < 0 ? 'Previous' : 'Next'} match"
+        onclick="event.stopPropagation();sliderNav('${idPrefix}',${dir})">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">${chevron(dir)}</svg>
+      </button>`;
+    // With a single item there are no chevrons at all — nothing to flank.
+    if (items.length === 1) return `<div class="arrow-slider">${cardBuilder(items[0])}</div>`;
+    return `
+      <div class="arrow-slider-inline">
+        ${btn(-1, hasPrev)}
+        ${cardBuilder(items[safeIdx])}
+        ${btn(1, hasNext)}
+      </div>`;
+  }
+
   // Arrow-nav slider builder — shows one card at a time with < > buttons
   function buildArrowSlider(items, idPrefix, cardBuilder, emptyMsg) {
     if (items.length === 0) return `<div class="empty-state">${emptyMsg}</div>`;
@@ -3967,10 +4019,10 @@ function buildHome() {
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
             </div>
           </div>
-          ${buildArrowSlider(upcomingMatches, 'match', buildMatchSlideCard,
+          ${buildInlineSlider(upcomingMatches, 'match', buildMatchSlideCard,
             followedTeam ? `No upcoming matches for ${followedTeam}` : 'No upcoming matches')}
           ${followableTeams.length ? `
-            <div style="display:flex;align-items:center;justify-content:center;gap:6px;margin-top:8px;font-size:13px;color:var(--text-muted);">
+            <div style="display:flex;align-items:center;justify-content:center;gap:6px;margin-top:6px;font-size:12px;color:var(--text-muted);">
               <span>Showing ${followedTeam}</span>
               <span style="color:var(--text-dim);">·</span>
               <span style="color:var(--accent);font-weight:600;cursor:pointer;" onclick="openFollowTeam()">Follow a team</span>
