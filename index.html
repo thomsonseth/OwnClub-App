@@ -114,10 +114,12 @@
     flex: 1;
     overflow-y: auto;
     overflow-x: hidden;
-    -webkit-overflow-scrolling: touch;
-    /* Keep overscroll inside this pane — reaching the top and pulling further
-       shouldn't drag the whole app container down. */
-    overscroll-behavior-y: contain;
+    /* `none`, not `contain`: contain only stops the overscroll chaining to the
+       page, while still letting this pane bounce on its own — which is the
+       drag people actually see. Legacy -webkit-overflow-scrolling is left off
+       deliberately; it reinstates the rubber band on iOS and momentum
+       scrolling is the default there now. */
+    overscroll-behavior: none;
   }
 
   .screen-scroll::-webkit-scrollbar { display: none; }
@@ -8256,7 +8258,37 @@ function showToast(msg, duration = 2000) {
   setTimeout(() => { state.modal = null; render(); }, duration);
 }
 
+// Belt-and-braces for the pull-down: overscroll-behavior handles this on
+// current browsers, but older WebKit ignores it on nested scrollers and still
+// rubber-bands the whole pane. Once a scroll pane is already at its limit,
+// swallow any further drag in that direction. Attached once to #app (which
+// survives re-renders) rather than to the panes themselves, which are rebuilt
+// on every render and would leak a listener each time.
+let _overscrollGuardAttached = false;
+function guardOverscrollOnce() {
+  if (_overscrollGuardAttached) return;
+  const app = document.getElementById('app');
+  if (!app) return;
+  _overscrollGuardAttached = true;
+  let startY = 0, pane = null;
+  app.addEventListener('touchstart', (e) => {
+    const t = e.touches && e.touches[0];
+    startY = t ? t.clientY : 0;
+    pane = e.target?.closest ? e.target.closest('.screen-scroll, .chat-messages') : null;
+  }, { passive: true });
+  app.addEventListener('touchmove', (e) => {
+    const t = e.touches && e.touches[0];
+    if (!pane || !t || !e.cancelable) return;
+    const dy = t.clientY - startY;
+    const atTop = pane.scrollTop <= 0;
+    const atBottom = pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 1;
+    if ((atTop && dy > 0) || (atBottom && dy < 0)) e.preventDefault();
+  }, { passive: false });
+}
+
 function attachEvents() {
+  guardOverscrollOnce();
+
   // Allow Enter on login
   const loginPw = document.getElementById('login-password');
   if (loginPw) loginPw.addEventListener('keydown', e => { if(e.key==='Enter') window.doLogin(); });
@@ -8377,10 +8409,16 @@ window.openTrainingSession = (id) => {
   render();
 };
 
+// Imported venues read "McDonnell Park — Oval 1 - East". Maps only wants the
+// venue, so drop the surface half — searching the whole string finds nothing.
+function mapsQuery(location) {
+  return String(location || '').split(' — ')[0].trim() || String(location || '');
+}
+
 window.openMaps = (id) => {
   const ev = state.events.find(e => e.id === id);
   if (!ev || !ev.location) return;
-  window.location.href = 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(ev.location);
+  window.location.href = 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(mapsQuery(ev.location));
 };
 
 window.showModalCancelSection = () => {
@@ -8518,6 +8556,17 @@ function clubTeamLabel(teamName, clubName) {
   return out && out.toLowerCase() !== c.toLowerCase() ? out : t;
 }
 
+// "McDonnell Park — Oval 1 - East". PlayHQ assigns a specific playing surface
+// within a venue, which is what actually tells players where to go. Mirrors
+// venueLabel() in playhq-sync-worker.js — keep the two in step.
+function venueLabel(venue) {
+  const name = (venue?.name || '').trim();
+  const surface = (venue?.surfaceName || '').trim();
+  if (!name) return surface || null;
+  if (!surface || surface.toLowerCase() === name.toLowerCase()) return name;
+  return `${name} — ${surface}`;
+}
+
 // Map a PlayHQ game object to the import screen's fixture shape. Only dated
 // games count — a team is "fixtured" once it has ≥1 scheduled game.
 function mapPHQGame(g, comp) {
@@ -8533,7 +8582,7 @@ function mapPHQGame(g, comp) {
     awayTeam: away || 'TBC',
     date: g.schedule?.date || '',
     time: (g.schedule?.time || '').slice(0,5),
-    venue: g.venue?.name || 'TBC',
+    venue: venueLabel(g.venue) || 'TBC',
     gradeName: g.grade?.name || null,
     gradeId: g.grade?.id || null,
     comp,
