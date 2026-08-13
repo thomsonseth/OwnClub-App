@@ -1807,8 +1807,6 @@ const state = {
     error: '',
     seasons: [],
     summary: [],               // fixtured teams: { teamId, teamName, grade, comp, isPast, fixtures[] }
-    notFixtured: [],           // registered team names still waiting on a published fixture
-    noTeamComps: [],           // current competitions with no club teams registered yet
     pastSelectedIds: [],       // completed seasons the admin ticked for inclusion
     showPastSeasons: false,
   },
@@ -5066,17 +5064,9 @@ function buildImportFixture() {
         <div style="display:flex;flex-direction:column;gap:8px;">${s.summary.map(teamRow).join('')}</div>
       ` : s.loaded ? `<div class="empty-state">No fixtures published on PlayHQ yet — check back once the season fixture drops.</div>` : ''}
 
-      ${s.notFixtured.length ? `
+      ${s.loaded ? `
         <div style="background:var(--surface);border-radius:12px;padding:12px 14px;font-size:12px;color:var(--text-dim);line-height:1.6;">
-          <strong style="color:var(--text-muted);">Registered but not fixtured yet:</strong> ${s.notFixtured.join(', ')}.<br/>
-          Their games will be added automatically once PlayHQ publishes them.
-        </div>
-      ` : ''}
-
-      ${s.noTeamComps.length ? `
-        <div style="background:var(--surface);border-radius:12px;padding:12px 14px;font-size:12px;color:var(--text-dim);line-height:1.6;">
-          <strong style="color:var(--text-muted);">No club teams entered yet:</strong> ${s.noTeamComps.join(', ')}.<br/>
-          Teams appear here once the club is entered into these competitions on PlayHQ (e.g. the women's sides) — their fixtures then sync automatically.
+          These are all the fixtures available on PlayHQ at this time. Any additional fixtured teams and grades will be added to the app automatically once they are uploaded to PlayHQ.
         </div>
       ` : ''}
 
@@ -8202,29 +8192,22 @@ window.importLoadAll = async () => {
     const seasonIds = [...currentIds, ...s.pastSelectedIds];
 
     const summary = [];
-    const notFixtured = [];
-    const noTeamComps = [];
     const seenGameIds = new Set();  // a club derby appears in both teams' fixtures
     for (const seasonId of seasonIds) {
       const season = s.seasons.find(x => x.id === seasonId);
       const comp = season?.competition?.name || season?.association?.name || '';
       const isPast = String(season?.status || '').startsWith('COMPLETE');
       const teams = (await playHQGet(`/teams?season=${encodeURIComponent(seasonId)}`)).data;
-      if (!teams.length && !isPast) noTeamComps.push(comp);
       for (const team of teams) {
         const games = (await playHQGet(`/fixture?team=${encodeURIComponent(team.id)}`)).data;
         const fixtures = games.map(g => mapPHQGame(g, comp)).filter(f => f.date && !seenGameIds.has(f.id));
         fixtures.forEach(f => seenGameIds.add(f.id));
         if (fixtures.length) {
           summary.push({ teamId: team.id, teamName: team.name, grade: team.grade?.name || '', comp, isPast, fixtures });
-        } else if (!isPast) {
-          notFixtured.push(team.name);
         }
       }
     }
     s.summary = summary;
-    s.notFixtured = [...new Set(notFixtured)];
-    s.noTeamComps = [...new Set(noTeamComps)];
     s.loaded = true;
   } catch(e) {
     s.error = `Failed to load fixtures: ${e.message}`;
@@ -8299,7 +8282,7 @@ window.importConfirm = async () => {
   // Reset import state
   state.importFixture = {
     loading: false, loaded: false, importing: false, error: '',
-    seasons: [], summary: [], notFixtured: [], noTeamComps: [],
+    seasons: [], summary: [],
     pastSelectedIds: [], showPastSeasons: false,
   };
 
