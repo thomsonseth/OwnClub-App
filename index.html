@@ -1801,16 +1801,15 @@ const state = {
   emailConfirmFinalizing: false,
   editingEventId: null,
   importFixture: {
-    step: 1,
-    seasons: [],
-    selectedSeasonIds: [],     // multi-select — e.g. DVCA Seniors + Summer Smash together
-    showPastSeasons: false,
-    grades: [],
-    selectedGradeIds: [],      // multi-select array
-    fixturesByGrade: {},       // { gradeId: { name, fixtures[] } }
-    selectedFixtureIds: [],
     loading: false,
+    loaded: false,             // true once the PlayHQ summary has been built
+    importing: false,
     error: '',
+    seasons: [],
+    summary: [],               // fixtured teams: { teamId, teamName, grade, comp, isPast, fixtures[] }
+    notFixtured: [],           // registered team names still waiting on a published fixture
+    pastSelectedIds: [],       // completed seasons the admin ticked for inclusion
+    showPastSeasons: false,
   },
   error: '',
 };
@@ -5002,154 +5001,82 @@ function buildTrainingSchedule() {
 // ── IMPORT FIXTURE (PlayHQ API) ───────────────────────────────────────────
 function buildImportFixture() {
   const s = state.importFixture;
-  const stepLabels = ['Season','Teams','Preview'];
 
-  // Seasons load automatically when the screen opens — no setup step needed
-  // (credentials live on the playhq-sync Worker).
-  if (s.step === 1 && !s.seasons.length && !s.loading && !s.error) {
-    setTimeout(() => importFetchSeasons(), 0);
+  // Everything loads automatically when the screen opens (credentials live
+  // on the playhq-sync Worker; there is nothing to configure in-app).
+  if (!s.loaded && !s.loading && !s.error) {
+    setTimeout(() => importLoadAll(), 0);
     s.loading = true;
   }
 
-  const stepBar = `<div class="import-step-bar">
-    ${stepLabels.map((l, i) => {
-      const n = i + 1;
-      const cls = n < s.step ? 'complete' : n === s.step ? 'active' : '';
-      return `<div class="import-step ${cls}">${n < s.step ? '✓ ' : ''}${l}</div>`;
-    }).join('')}
-  </div>`;
+  const totalGames = s.summary.reduce((n, t) => n + t.fixtures.length, 0);
+  const pastSeasons = s.seasons.filter(x => String(x.status).startsWith('COMPLETE'));
 
-  let body = '';
-
-  // ── STEP 1: Season(s) ──
-  if (s.step === 1) {
-    const isPast = (season) => String(season.status).startsWith('COMPLETE');
-    const current = s.seasons.filter(x => !isPast(x));
-    const past = s.seasons.filter(isPast);
-    const visible = s.showPastSeasons ? [...current, ...past] : current;
-    const selCount = s.selectedSeasonIds.length;
-
-    const seasonRow = (season) => {
-      const isSel = s.selectedSeasonIds.includes(season.id);
-      return `<div class="fixture-preview-row ${isSel?'selected':''}" onclick="toggleImportSeason('${season.id}')">
-        <div class="notif-checkbox ${isSel?'checked':''}" style="flex-shrink:0;">
-          ${isSel ? `<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" width="13" height="13"><polyline points="20 6 9 17 4 12"/></svg>` : ''}
-        </div>
-        <div style="flex:1;">
-          <div class="fixture-preview-title">${season.name}</div>
-          <div class="fixture-preview-meta">${season.status} · ${season.competition?.name || season.association?.name || ''}</div>
-        </div>
-      </div>`;
-    };
-    const rows = visible.map(seasonRow).join('');
-
-    body = `
-      <div style="background:rgba(26,58,143,0.08);border:1px solid rgba(26,58,143,0.3);border-radius:12px;padding:14px;font-size:13px;color:var(--text-muted);line-height:1.6;margin-bottom:4px;">
-        <strong style="color:var(--accent);">Import from PlayHQ</strong><br/>
-        Pick one or more competitions, choose your teams, and import. From then on it's automatic — new games and schedule changes sync to the app overnight, and admins get a notification when new fixtures land.
+  const teamRow = (t) => `
+    <div class="fixture-preview-row selected">
+      <div style="flex:1;min-width:0;">
+        <div class="fixture-preview-title">${t.teamName}</div>
+        <div class="fixture-preview-meta">${[t.grade, t.comp].filter(Boolean).join(' · ')}${t.isPast ? ' · <span style="color:var(--text-dim);">past season</span>' : ''}</div>
       </div>
-      ${s.loading && !s.seasons.length ? `<div style="text-align:center;color:var(--text-muted);padding:24px 0;">Loading seasons from PlayHQ…</div>` : `
-        <div style="font-size:14px;color:var(--text-muted);margin-bottom:4px;">Upcoming &amp; active competitions — select all that apply.</div>
-        <div style="display:flex;flex-direction:column;gap:8px;">${rows || '<div class="empty-state">No upcoming seasons found on PlayHQ.</div>'}</div>
-        ${past.length ? `
-          <button onclick="togglePastSeasons()" style="background:none;border:none;color:var(--accent);font-size:13px;font-weight:600;cursor:pointer;text-align:left;padding:4px 0;">
-            ${s.showPastSeasons ? '▲ Hide past seasons' : `▼ Show past seasons (${past.length})`}
-          </button>
+      <div style="color:var(--accent);font-weight:700;font-size:13px;flex-shrink:0;">${t.fixtures.length} game${t.fixtures.length !== 1 ? 's' : ''}</div>
+    </div>`;
+
+  const pastRow = (season) => {
+    const isSel = s.pastSelectedIds.includes(season.id);
+    return `<div class="fixture-preview-row ${isSel?'selected':''}" onclick="toggleImportPastSeason('${season.id}')">
+      <div class="notif-checkbox ${isSel?'checked':''}" style="flex-shrink:0;">
+        ${isSel ? `<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" width="13" height="13"><polyline points="20 6 9 17 4 12"/></svg>` : ''}
+      </div>
+      <div style="flex:1;">
+        <div class="fixture-preview-title">${season.name}</div>
+        <div class="fixture-preview-meta">${season.competition?.name || season.association?.name || ''}</div>
+      </div>
+    </div>`;
+  };
+
+  const body = `
+    <div style="background:rgba(26,58,143,0.08);border:1px solid rgba(26,58,143,0.3);border-radius:12px;padding:14px;font-size:13px;color:var(--text-muted);line-height:1.6;">
+      <strong style="color:var(--accent);">Import from PlayHQ</strong><br/>
+      One tap imports every game currently fixtured on PlayHQ. Anything published later — new teams, extra rounds, schedule changes — is added automatically overnight, and admins get a notification when new fixtures land.
+    </div>
+
+    ${s.loading ? `<div style="text-align:center;color:var(--text-muted);padding:24px 0;">Checking PlayHQ for fixtures…</div>` : `
+
+      ${s.summary.length ? `
+        <div style="font-size:14px;font-weight:700;color:var(--text);margin-top:4px;">This import includes:</div>
+        <div style="display:flex;flex-direction:column;gap:8px;">${s.summary.map(teamRow).join('')}</div>
+      ` : s.loaded ? `<div class="empty-state">No fixtures published on PlayHQ yet — check back once the season fixture drops.</div>` : ''}
+
+      ${s.notFixtured.length ? `
+        <div style="background:var(--surface);border-radius:12px;padding:12px 14px;font-size:12px;color:var(--text-dim);line-height:1.6;">
+          <strong style="color:var(--text-muted);">Registered but not fixtured yet:</strong> ${s.notFixtured.join(', ')}.<br/>
+          Their games will be added automatically once PlayHQ publishes them.
+        </div>
+      ` : ''}
+
+      ${pastSeasons.length ? `
+        <button onclick="togglePastSeasons()" style="background:none;border:none;color:var(--accent);font-size:13px;font-weight:600;cursor:pointer;text-align:left;padding:4px 0;">
+          ${s.showPastSeasons ? '▲ Hide past seasons' : `▼ Import past seasons (${pastSeasons.length})`}
+        </button>
+        ${s.showPastSeasons ? `
+          <div style="font-size:12px;color:var(--text-dim);margin-top:-6px;">Tick a past season to include its fixtures in the import.</div>
+          <div style="display:flex;flex-direction:column;gap:8px;">${pastSeasons.map(pastRow).join('')}</div>
         ` : ''}
-      `}
-      ${s.error ? `<div class="error-msg">${s.error}</div><button class="btn-secondary" onclick="importFetchSeasons()">Retry</button>` : ''}
-      ${s.seasons.length ? `
-        <button class="btn-primary" onclick="importFetchGrades()" ${selCount===0?'disabled style="opacity:0.4;"':''}>
-          ${s.loading ? 'Loading…' : `Fetch teams${selCount > 1 ? ` (${selCount} competitions)` : ''} →`}
-        </button>
-      ` : ''}`;
-  }
+      ` : ''}
+    `}
 
-  // ── STEP 2: Teams ──
-  else if (s.step === 2) {
-    const selCount = s.selectedGradeIds.length;
-    const rows = s.grades.map(team => {
-      const isSel = s.selectedGradeIds.includes(team.id);
-      return `<div class="fixture-preview-row ${isSel?'selected':''}"
-        onclick="toggleImportGrade('${team.id}')">
-        <div class="notif-checkbox ${isSel?'checked':''}" style="flex-shrink:0;">
-          ${isSel ? `<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" width="13" height="13"><polyline points="20 6 9 17 4 12"/></svg>` : ''}
-        </div>
-        <div style="flex:1;">
-          <div class="fixture-preview-title">${team.name}</div>
-          <div class="fixture-preview-meta">${[team.grade?.name, team.competitionName].filter(Boolean).join(' · ')}</div>
-        </div>
-      </div>`;
-    }).join('');
+    ${s.error ? `<div class="error-msg">${s.error}</div><button class="btn-secondary" onclick="importLoadAll()">Retry</button>` : ''}
 
-    body = `
-      <div style="font-size:14px;color:var(--text-muted);margin-bottom:4px;">These teams are in the selected season — all are selected by default.</div>
-      <div style="display:flex;flex-direction:column;gap:8px;">${rows}</div>
-      ${s.error ? `<div class="error-msg">${s.error}</div>` : ''}
-      <div style="display:flex;gap:10px;">
-        <button class="btn-secondary" style="flex:1;" onclick="importGoStep(1)">← Back</button>
-        <button class="btn-primary" style="flex:2;" onclick="importFetchFixtures()" ${selCount===0?'disabled style="opacity:0.4;"':''}>
-          ${s.loading ? 'Loading…' : `Fetch fixtures${selCount > 1 ? ` (${selCount} teams)` : ''} →`}
-        </button>
-      </div>`;
-  }
-
-  // ── STEP 3: Preview & Select ──
-  else if (s.step === 3) {
-    const allFixtures = Object.values(s.fixturesByGrade).flatMap(g => g.fixtures);
-    const totalCount = allFixtures.length;
-    const selCount = s.selectedFixtureIds.length;
-
-    const gradeGroups = Object.entries(s.fixturesByGrade).map(([gradeId, gradeData]) => {
-      const gradeFixtures = gradeData.fixtures;
-      const allGradeSel = gradeFixtures.every(f => s.selectedFixtureIds.includes(f.id));
-      const rows = gradeFixtures.map(fix => {
-        const isSel = s.selectedFixtureIds.includes(fix.id);
-        return `<div class="fixture-preview-row ${isSel?'selected':''}" onclick="toggleFixtureSelect('${fix.id}')">
-          <div class="notif-checkbox ${isSel?'checked':''}" style="flex-shrink:0;">
-            ${isSel ? `<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" width="13" height="13"><polyline points="20 6 9 17 4 12"/></svg>` : ''}
-          </div>
-          <div style="flex:1;min-width:0;">
-            <div class="fixture-preview-title">${fix.homeTeam} vs ${fix.awayTeam}</div>
-            <div class="fixture-preview-meta">${formatDate(fix.date)} · ${fix.time || 'TBC'} · ${fix.venue}</div>
-            ${fix.round ? `<div style="font-size:11px;color:var(--text-dim);margin-top:1px;">Round ${fix.round}</div>` : ''}
-          </div>
-        </div>`;
-      }).join('');
-
-      return `<div>
-        <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0 6px;">
-          <div style="font-size:13px;font-weight:700;color:var(--accent);">${gradeData.name}</div>
-          <button onclick="toggleAllGradeFixtures('${gradeId}')" style="background:none;border:none;color:var(--accent);font-size:12px;font-weight:600;cursor:pointer;">
-            ${allGradeSel ? 'Deselect all' : 'Select all'}
-          </button>
-        </div>
-        <div style="display:flex;flex-direction:column;gap:6px;">${rows}</div>
-      </div>`;
-    }).join('<div style="height:1px;background:var(--border);margin:8px 0;"></div>');
-
-    body = `
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
-        <div style="font-size:14px;color:var(--text-muted);">${totalCount} fixtures · ${selCount} selected</div>
-        <button onclick="selectAllFixtures()" style="background:none;border:none;color:var(--accent);font-size:13px;font-weight:600;cursor:pointer;">
-          ${selCount === totalCount ? 'Deselect all' : 'Select all'}
-        </button>
-      </div>
-      ${gradeGroups || '<div class="empty-state">No fixtures found.</div>'}
-      ${s.error ? `<div class="error-msg">${s.error}</div>` : ''}
-      <div style="display:flex;gap:10px;margin-top:4px;">
-        <button class="btn-secondary" style="flex:1;" onclick="importGoStep(2)">← Back</button>
-        <button class="btn-primary" style="flex:2;" onclick="importConfirm()" ${selCount===0||s.loading?'disabled style="opacity:0.4;"':''}>
-          ${s.loading ? 'Importing…' : `Import ${selCount > 0 ? selCount : ''} fixture${selCount !== 1 ? 's' : ''}`}
-        </button>
-      </div>`;
-  }
+    ${!s.loading && s.summary.length ? `
+      <button class="btn-primary" onclick="importConfirm()" ${s.importing ? 'disabled style="opacity:0.4;"' : ''}>
+        ${s.importing ? 'Importing…' : `Import all (${totalGames} game${totalGames !== 1 ? 's' : ''})`}
+      </button>
+    ` : ''}`;
 
   return `<div class="screen">
     ${buildTopBanner({ title: 'Import Fixture', showBack: true })}
     <div class="screen-scroll">
       <div style="padding:16px;display:flex;flex-direction:column;gap:14px;">
-        ${stepBar}
         ${body}
         <div style="height:8px;"></div>
       </div>
@@ -8193,37 +8120,18 @@ function isClubTeamName(name) {
   return (name || '').toLowerCase().includes(PHQ_CLUB_WORD);
 }
 
-window.importGoStep = (step) => {
-  state.importFixture.step = step;
-  state.importFixture.error = '';
-  render();
-};
-
-window.toggleImportSeason = (id) => {
-  const ids = state.importFixture.selectedSeasonIds;
-  const idx = ids.indexOf(id);
-  if (idx >= 0) ids.splice(idx, 1);
-  else ids.push(id);
-  render();
-};
-
 window.togglePastSeasons = () => {
   state.importFixture.showPastSeasons = !state.importFixture.showPastSeasons;
   render();
 };
 
-window.toggleImportGrade = (id) => {
-  const ids = state.importFixture.selectedGradeIds;
-  const idx = ids.indexOf(id);
-  if (idx >= 0) ids.splice(idx, 1);
-  else ids.push(id);
-  render();
-};
-
-// kept for back-compat but no longer used in grade step
-window.selectImportGrade = (id) => {
-  state.importFixture.selectedGradeIds = [id];
-  render();
+window.toggleImportPastSeason = (id) => {
+  const s = state.importFixture;
+  const idx = s.pastSelectedIds.indexOf(id);
+  if (idx >= 0) s.pastSelectedIds.splice(idx, 1);
+  else s.pastSelectedIds.push(id);
+  s.loaded = false;   // summary must be rebuilt for the new season set —
+  render();           // buildImportFixture re-triggers importLoadAll
 };
 
 window.toggleAnnNotification = () => {
@@ -8231,219 +8139,139 @@ window.toggleAnnNotification = () => {
   render();
 };
 
-window.importFetchSeasons = async () => {
+// Map a PlayHQ game object to the import screen's fixture shape. Only dated
+// games count — a team is "fixtured" once it has ≥1 scheduled game.
+function mapPHQGame(g, comp) {
+  const comps = Array.isArray(g.competitors) ? g.competitors : [];
+  const home = comps.find(c => c.isHomeTeam)?.name;
+  const away = comps.find(c => !c.isHomeTeam)?.name;
+  const roundMatch = String(g.round?.name || g.round?.abbreviatedName || '').match(/\d+/);
+  return {
+    id: g.id,
+    round: roundMatch ? Number(roundMatch[0]) : null,
+    homeTeam: home || 'TBC',
+    awayTeam: away || 'TBC',
+    date: g.schedule?.date || '',
+    time: (g.schedule?.time || '').slice(0,5),
+    venue: g.venue?.name || 'TBC',
+    gradeName: g.grade?.name || null,
+    gradeId: g.grade?.id || null,
+    comp,
+  };
+}
+
+// Load everything currently fixtured on PlayHQ: every club team across all
+// non-completed seasons (plus any past seasons the admin ticked), and every
+// scheduled game for those teams. Teams without a dated game yet are listed
+// separately as "not fixtured" — they are excluded from the import but will
+// arrive automatically via the nightly sync once PlayHQ publishes them.
+window.importLoadAll = async () => {
   const s = state.importFixture;
-  state.importFixture.loading = true;
-  state.importFixture.error = '';
+  s.loading = true;
+  s.error = '';
   render();
-
   try {
-    const data = await playHQGet('/seasons');
-    const seasons = data.data;
-    state.importFixture.seasons = seasons;
-    // Pre-select every current (non-completed) competition — past seasons
-    // stay hidden behind the "Show past seasons" toggle.
-    state.importFixture.selectedSeasonIds = seasons
-      .filter(x => !String(x.status).startsWith('COMPLETE'))
-      .map(x => x.id);
-  } catch(e) {
-    state.importFixture.error = `Failed to fetch seasons: ${e.message}`;
-  }
-  state.importFixture.loading = false;
-  render();
-};
+    if (!s.seasons.length) s.seasons = (await playHQGet('/seasons')).data;
+    const currentIds = s.seasons.filter(x => !String(x.status).startsWith('COMPLETE')).map(x => x.id);
+    const seasonIds = [...currentIds, ...s.pastSelectedIds];
 
-window.importFetchGrades = async () => {
-  const s = state.importFixture;
-  if (!s.selectedSeasonIds.length) { state.importFixture.error = 'Please select at least one competition.'; render(); return; }
-  state.importFixture.loading = true;
-  state.importFixture.error = '';
-  render();
-
-  try {
-    // The proxy returns the club's TEAMS per season (PlayHQ's public API
-    // only exposes fixtures per team, not per grade). Aggregate across all
-    // selected competitions, tagging each team with its competition so
-    // same-named teams (e.g. "Laurimar 1st XI") stay distinguishable.
-    const grades = [];
-    for (const seasonId of s.selectedSeasonIds) {
+    const summary = [];
+    const notFixtured = [];
+    const seenGameIds = new Set();  // a club derby appears in both teams' fixtures
+    for (const seasonId of seasonIds) {
       const season = s.seasons.find(x => x.id === seasonId);
-      const compName = season?.competition?.name || season?.association?.name || '';
-      const data = await playHQGet(`/teams?season=${encodeURIComponent(seasonId)}`);
-      data.data.forEach(t => {
-        if (!grades.find(g => g.id === t.id)) grades.push({ ...t, competitionName: compName });
-      });
-    }
-    if (!grades.length) throw new Error('No club teams found in the selected competitions yet — check the fixture has been published on PlayHQ.');
-    state.importFixture.grades = grades;
-    state.importFixture.selectedGradeIds = grades.map(g => g.id);   // all teams selected by default
-    state.importFixture.step = 2;
-  } catch(e) {
-    state.importFixture.error = `Failed to fetch teams: ${e.message}`;
-  }
-  state.importFixture.loading = false;
-  render();
-};
-
-window.importFetchFixtures = async () => {
-  const s = state.importFixture;
-  if (!s.selectedGradeIds.length) { state.importFixture.error = 'Please select at least one grade.'; render(); return; }
-  state.importFixture.loading = true;
-  state.importFixture.error = '';
-  render();
-
-  try {
-    const fixturesByGrade = {};
-    {
-      // One PlayHQ game can appear in two selected teams' fixtures (club
-      // derby) — track seen ids so it's only listed once.
-      const seenGameIds = new Set();
-      for (const teamId of s.selectedGradeIds) {
-        const team = s.grades.find(g => g.id === teamId);
-        const data = await playHQGet(`/fixture?team=${encodeURIComponent(teamId)}`);
-        const fixtures = data.data.map(g => {
-          const comps = Array.isArray(g.competitors) ? g.competitors : [];
-          const home = comps.find(c => c.isHomeTeam)?.name;
-          const away = comps.find(c => !c.isHomeTeam)?.name;
-          const roundMatch = String(g.round?.name || g.round?.abbreviatedName || '').match(/\d+/);
-          return {
-            id: g.id,
-            round: roundMatch ? Number(roundMatch[0]) : null,
-            homeTeam: home || 'TBC',
-            awayTeam: away || 'TBC',
-            date: g.schedule?.date || '',
-            time: (g.schedule?.time || '').slice(0,5),
-            venue: g.venue?.name || 'TBC',
-            gradeName: g.grade?.name || team?.grade?.name || null,
-            gradeId: g.grade?.id || team?.grade?.id || null,
-          };
-        }).filter(f => f.date && !seenGameIds.has(f.id));
+      const comp = season?.competition?.name || season?.association?.name || '';
+      const isPast = String(season?.status || '').startsWith('COMPLETE');
+      const teams = (await playHQGet(`/teams?season=${encodeURIComponent(seasonId)}`)).data;
+      for (const team of teams) {
+        const games = (await playHQGet(`/fixture?team=${encodeURIComponent(team.id)}`)).data;
+        const fixtures = games.map(g => mapPHQGame(g, comp)).filter(f => f.date && !seenGameIds.has(f.id));
         fixtures.forEach(f => seenGameIds.add(f.id));
-        fixturesByGrade[teamId] = {
-          name: team ? [team.name, team.grade?.name, team.competitionName].filter(Boolean).join(' — ') : teamId,
-          fixtures,
-        };
+        if (fixtures.length) {
+          summary.push({ teamId: team.id, teamName: team.name, grade: team.grade?.name || '', comp, isPast, fixtures });
+        } else if (!isPast) {
+          notFixtured.push(team.name);
+        }
       }
     }
-    state.importFixture.fixturesByGrade = fixturesByGrade;
-    // Pre-select all fixtures across all teams
-    state.importFixture.selectedFixtureIds = Object.values(fixturesByGrade).flatMap(g => g.fixtures.map(f => f.id));
-    state.importFixture.step = 3;
+    s.summary = summary;
+    s.notFixtured = [...new Set(notFixtured)];
+    s.loaded = true;
   } catch(e) {
-    state.importFixture.error = `Failed to fetch fixtures: ${e.message}`;
+    s.error = `Failed to load fixtures: ${e.message}`;
   }
-  state.importFixture.loading = false;
+  s.loading = false;
   render();
 };
 
-window.toggleFixtureSelect = (id) => {
-  const ids = state.importFixture.selectedFixtureIds;
-  const idx = ids.indexOf(id);
-  if (idx >= 0) ids.splice(idx, 1);
-  else ids.push(id);
-  render();
-};
-
-window.selectAllFixtures = () => {
-  const s = state.importFixture;
-  const allIds = Object.values(s.fixturesByGrade).flatMap(g => g.fixtures.map(f => f.id));
-  if (s.selectedFixtureIds.length === allIds.length) {
-    s.selectedFixtureIds = [];
-  } else {
-    s.selectedFixtureIds = allIds;
-  }
-  render();
-};
-
-window.toggleAllGradeFixtures = (gradeId) => {
-  const s = state.importFixture;
-  const gradeFixtures = s.fixturesByGrade[gradeId]?.fixtures || [];
-  const gradeIds = gradeFixtures.map(f => f.id);
-  const allSel = gradeIds.every(id => s.selectedFixtureIds.includes(id));
-  if (allSel) {
-    s.selectedFixtureIds = s.selectedFixtureIds.filter(id => !gradeIds.includes(id));
-  } else {
-    const existing = new Set(s.selectedFixtureIds);
-    gradeIds.forEach(id => existing.add(id));
-    s.selectedFixtureIds = [...existing];
-  }
-  render();
-};
-
+// "Import all" — upserts every listed game into Supabase. Idempotent:
+// re-importing updates existing rows (matched on play_hq_id), never
+// duplicates them.
 window.importConfirm = async () => {
   const s = state.importFixture;
-  if (s.loading) return;
+  if (s.loading || s.importing) return;
 
-  // Build one row per selected fixture, keyed by PlayHQ id (a batch upsert
-  // must not contain the same conflict key twice).
+  // One row per game, keyed by PlayHQ id (a batch upsert must not contain
+  // the same conflict key twice).
   const rowsById = {};
-  Object.entries(s.fixturesByGrade).forEach(([teamId, gradeData]) => {
-    gradeData.fixtures
-      .filter(f => s.selectedFixtureIds.includes(f.id))
-      .forEach(fix => {
-        const gradeName = fix.gradeName || gradeData.name;
-        rowsById[fix.id] = {
-          play_hq_id: fix.id,
-          type: 'match',
-          title: `${fix.homeTeam} vs ${fix.awayTeam}`,
-          date: fix.date,
-          time: fix.time || null,
-          finish_date: fix.date,
-          location: fix.venue || null,
-          description: `Round ${fix.round || '—'} · ${gradeName} · Imported from PlayHQ`,
-          cost: 0,
-          grade: gradeName,
-          grade_id: fix.gradeId || teamId,
-          round: fix.round || null,
-          home_team: fix.homeTeam,
-          away_team: fix.awayTeam,
-          home_away: isClubTeamName(fix.homeTeam) ? 'Home' : 'Away',
-          from_schedule: true,
-        };
-      });
+  s.summary.forEach(t => {
+    t.fixtures.forEach(fix => {
+      const gradeName = fix.gradeName || t.grade || t.comp;
+      rowsById[fix.id] = {
+        play_hq_id: fix.id,
+        type: 'match',
+        title: `${fix.homeTeam} vs ${fix.awayTeam}`,
+        date: fix.date,
+        time: fix.time || null,
+        finish_date: fix.date,
+        location: fix.venue || null,
+        description: `Round ${fix.round || '—'} · ${gradeName} · Imported from PlayHQ`,
+        cost: 0,
+        grade: gradeName,
+        grade_id: fix.gradeId || t.teamId,
+        round: fix.round || null,
+        home_team: fix.homeTeam,
+        away_team: fix.awayTeam,
+        home_away: isClubTeamName(fix.homeTeam) ? 'Home' : 'Away',
+        from_schedule: true,
+      };
+    });
   });
   const rows = Object.values(rowsById);
-  let importCount = rows.length;
+  if (!rows.length) return;
 
-  {
-    state.importFixture.loading = true;
-    state.importFixture.error = '';
+  s.importing = true;
+  s.error = '';
+  render();
+  let importCount = 0;
+  try {
+    const saved = await sb.upsert('events', rows, 'on_conflict=play_hq_id');
+    if (!Array.isArray(saved)) throw new Error(saved?.message || 'Save failed');
+    saved.forEach(row => {
+      const ev = rowToEvent(row);
+      const idx = state.events.findIndex(e => e.playHQId === ev.playHQId || e.id === ev.id);
+      if (idx >= 0) state.events[idx] = { ...state.events[idx], ...ev, rsvp: state.events[idx].rsvp, rsvpGuests: state.events[idx].rsvpGuests, team: state.events[idx].team };
+      else state.events.push(ev);
+    });
+    importCount = saved.length;
+  } catch(e) {
+    s.importing = false;
+    s.error = `Import failed: ${e.message}`;
     render();
-    try {
-      // Idempotent: re-importing updates existing rows in place (matched on
-      // play_hq_id) instead of duplicating them.
-      const saved = await sb.upsert('events', rows, 'on_conflict=play_hq_id');
-      if (!Array.isArray(saved)) throw new Error(saved?.message || 'Save failed');
-      saved.forEach(row => {
-        const ev = rowToEvent(row);
-        const idx = state.events.findIndex(e => e.playHQId === ev.playHQId || e.id === ev.id);
-        if (idx >= 0) state.events[idx] = { ...state.events[idx], ...ev, rsvp: state.events[idx].rsvp, rsvpGuests: state.events[idx].rsvpGuests, team: state.events[idx].team };
-        else state.events.push(ev);
-      });
-      importCount = saved.length;
-    } catch(e) {
-      state.importFixture.loading = false;
-      state.importFixture.error = `Import failed: ${e.message}`;
-      render();
-      return;
-    }
-    state.importFixture.loading = false;
+    return;
   }
+  s.importing = false;
 
   state.events.sort((a, b) => a.date > b.date ? 1 : -1);
 
   // Smart filter — show upcoming if any, else past
-  const allImported = Object.values(s.fixturesByGrade)
-    .flatMap(g => g.fixtures)
-    .filter(f => s.selectedFixtureIds.includes(f.id));
-  state.eventsFilter = allImported.some(f => isUpcoming(f.date)) ? 'upcoming' : 'past';
+  state.eventsFilter = rows.some(r => isUpcoming(r.date)) ? 'upcoming' : 'past';
 
   // Reset import state
   state.importFixture = {
-    step: 1, seasons: [], selectedSeasonIds: [], showPastSeasons: false,
-    grades: [], selectedGradeIds: [],
-    fixturesByGrade: {}, selectedFixtureIds: [],
-    loading: false, error: '',
+    loading: false, loaded: false, importing: false, error: '',
+    seasons: [], summary: [], notFixtured: [],
+    pastSelectedIds: [], showPastSeasons: false,
   };
 
   state.activeTab = 'events';
