@@ -1699,11 +1699,15 @@ const CLUB_CONFIG = {
     { role: 'President', name: 'Jason Merrett', phone: '0402 271 890', email: 'laurimarcc.president@gmail.com' },
     { role: 'Secretary', name: 'Shannon Wells', phone: '0439 430 304', email: 'laurimar.cricketclub@gmail.com' },
   ],
-  // Manually-scheduled match dropdowns. matchGrades is only a STARTING list for
-  // a club with no fixtures yet — once fixtures are imported, the real PlayHQ
-  // grade names are merged in automatically (see matchGradeOptions()).
-  matchFormats: ['2 Day match', 'One Day match', 'T20 match', 'Practice match'],
-  matchGrades:  ['1st XI', '2nd XI', '3rd XI', '4th XI', '5th XI', 'Vets'],
+  // Manually-scheduled matches are always unofficial (not on PlayHQ), so they
+  // carry one fixed format and group under their own heading in the Matches
+  // tab. Rename both for a club that calls them something else.
+  unofficialMatchFormat: 'Practice match',
+  unofficialMatchLabel:  'Unofficial Matches',
+  // Only a STARTING list for the manual-match grade dropdown, for a club with
+  // no fixtures yet — once fixtures are imported the club's real team names
+  // are merged in automatically (see matchGradeOptions()).
+  matchGrades: ['1st XI', '2nd XI', '3rd XI', '4th XI', '5th XI', 'Vets'],
   estYear: '2017',
   poweredBy: 'Lucidigi',
   appUrl: 'https://laurimar-power.netlify.app',
@@ -4219,12 +4223,12 @@ function buildEvents() {
   // For matches: group by grade if any events have a grade set
   let cards;
   if (tab === 'matches') {
-    const hasGrades = filtered.some(ev => ev.grade);
+    const hasGrades = filtered.some(ev => ev.grade || !ev.playHQId);
     if (hasGrades) {
       // initialise all grades as expanded if expandedGrades is null
       const gradeMap = {};
       filtered.forEach(ev => {
-        const key = ev.grade || '__ungrouped__';
+        const key = matchGroupKey(ev);
         if (!gradeMap[key]) gradeMap[key] = [];
         gradeMap[key].push(ev);
       });
@@ -4702,8 +4706,12 @@ function matchGradeOptions(current) {
   return matchOptionList(CLUB_CONFIG.matchGrades, 'grade', current);
 }
 
-function matchFormatOptions(current) {
-  return matchOptionList(CLUB_CONFIG.matchFormats, 'format', current);
+// Which accordion a match sits under in the Matches tab. Anything not backed
+// by a PlayHQ fixture is a manually-scheduled unofficial match and groups
+// together, rather than mixing in with that team's official fixtures.
+function matchGroupKey(ev) {
+  if (!ev.playHQId) return CLUB_CONFIG.unofficialMatchLabel;
+  return ev.grade || '__ungrouped__';
 }
 
 // ── CREATE EVENT ──────────────────────────────────────────────────────────
@@ -4712,6 +4720,10 @@ function buildCreateEvent() {
   const notif = f.notifications;
   const activeImage = f.image; // only uploaded images now
   const isMatch = f.category === 'match';
+  // Editing a PlayHQ fixture: its format is governed by the competition, so
+  // the (unofficial-only) format field is hidden rather than shown as a lie.
+  const isImportedFixture = !!(state.editingEventId &&
+    state.events.find(e => e.id === state.editingEventId)?.playHQId);
 
   // ── Match-specific fields (Opponent, Gender, Format, Grade, Home/Away) ──
   const matchFieldsSection = `
@@ -4729,14 +4741,17 @@ function buildCreateEvent() {
       </div>
     </div>
 
+    ${isImportedFixture ? '' : `
     <div class="input-group">
       <label class="input-label">Format</label>
-      <select id="ce-format" onchange="saveCEField('format', this.value)">
-        <option value=""      ${!f.format?'selected':''}>Select format</option>
-        ${matchFormatOptions(f.format).map(o => `
-          <option value="${o.replace(/"/g,'&quot;')}" ${f.format===o?'selected':''}>${o}</option>`).join('')}
-      </select>
-    </div>
+      <div class="input-field" style="display:flex;align-items:center;justify-content:space-between;color:var(--text-muted);">
+        <span>${f.format || CLUB_CONFIG.unofficialMatchFormat}</span>
+        <span style="font-size:11px;color:var(--text-dim);">Unofficial match</span>
+      </div>
+      <div style="font-size:11px;color:var(--text-dim);margin-top:4px;">
+        Official fixtures come from PlayHQ — matches scheduled here are always ${CLUB_CONFIG.unofficialMatchFormat.toLowerCase()}es.
+      </div>
+    </div>`}
 
     <div class="input-group">
       <label class="input-label">Grade</label>
@@ -5057,7 +5072,7 @@ function buildImportFixture() {
   const teamRow = (t) => `
     <div class="fixture-preview-row selected">
       <div style="flex:1;min-width:0;">
-        <div class="fixture-preview-title">${t.teamName}</div>
+        <div class="fixture-preview-title">${t.teamLabel || t.teamName}</div>
         <div class="fixture-preview-meta">${[t.grade, t.comp].filter(Boolean).join(' · ')}${t.isPast ? ' · <span style="color:var(--text-dim);">past season</span>' : ''}</div>
       </div>
       <div style="color:var(--accent);font-weight:700;font-size:13px;flex-shrink:0;">${t.fixtures.length} game${t.fixtures.length !== 1 ? 's' : ''}</div>
@@ -7099,6 +7114,9 @@ window.openScheduleMatch = () => {
   state.createEventForm = {
     ...blankCreateEventForm(),
     category: 'match',
+    // Manually scheduled matches are unofficial by definition — official
+    // fixtures only ever arrive from PlayHQ.
+    format: CLUB_CONFIG.unofficialMatchFormat,
     location: `${CLUB_CONFIG.homeGround}, ${CLUB_CONFIG.homeAddress}`,
   };
   state.error = '';
@@ -8175,6 +8193,39 @@ window.toggleAnnNotification = () => {
   render();
 };
 
+// Generic club-type words that carry no team identity once the club name is
+// already known ("Laurimar CC Spring Black" -> "Spring Black").
+const CLUB_WORDS = new Set([
+  'cc','fc','afc','sc','cfc','club','cricket','football','netball',
+  'soccer','basketball','sports','sporting','association','inc',
+]);
+
+// The short label a club uses for one of its teams, derived by stripping the
+// club name PlayHQ repeats on every team ("Laurimar 1st XI" -> "1st XI",
+// "BUCC Reserves" -> "Reserves"). When nothing distinguishing is left — the
+// team name IS the club name — the full name is kept. Mirrors clubTeamLabel()
+// in playhq-sync-worker.js; keep the two in step.
+function clubTeamLabel(teamName, clubName) {
+  const t = (teamName || '').trim();
+  const c = (clubName || '').trim();
+  if (!t) return null;
+  if (!c) return t;
+  const tw = t.split(/\s+/), cw = c.split(/\s+/);
+  let i = 0;
+  while (i < tw.length && i < cw.length && tw[i].toLowerCase() === cw[i].toLowerCase()) i++;
+  if (i >= tw.length) return t;
+  const acronym = cw.map(w => w[0]).join('').toLowerCase();
+  let rest = tw.slice(i);
+  while (rest.length) {
+    const w = rest[0].toLowerCase().replace(/[^a-z]/g, '');
+    if (CLUB_WORDS.has(w) || w === acronym) rest = rest.slice(1);
+    else break;
+  }
+  if (!rest.length) return t;
+  const out = rest.join(' ').trim();
+  return out && out.toLowerCase() !== c.toLowerCase() ? out : t;
+}
+
 // Map a PlayHQ game object to the import screen's fixture shape. Only dated
 // games count — a team is "fixtured" once it has ≥1 scheduled game.
 function mapPHQGame(g, comp) {
@@ -8224,7 +8275,13 @@ window.importLoadAll = async () => {
         const fixtures = games.map(g => mapPHQGame(g, comp)).filter(f => f.date && !seenGameIds.has(f.id));
         fixtures.forEach(f => seenGameIds.add(f.id));
         if (fixtures.length) {
-          summary.push({ teamId: team.id, teamName: team.name, grade: team.grade?.name || '', comp, isPast, fixtures });
+          summary.push({
+            teamId: team.id,
+            teamName: team.name,
+            teamLabel: clubTeamLabel(team.name, team.clubName),
+            grade: team.grade?.name || '',
+            comp, isPast, fixtures,
+          });
         }
       }
     }
@@ -8251,7 +8308,11 @@ window.importConfirm = async () => {
   const rowsById = {};
   s.summary.forEach(t => {
     t.fixtures.forEach(fix => {
-      const gradeName = fix.gradeName || t.grade || t.comp;
+      // `grade` groups matches in the app, so it holds the club's own team
+      // label ("1st XI"); the competition grade ("04 - Dyson Shield") stays
+      // visible in the description.
+      const competitionGrade = fix.gradeName || t.grade || t.comp;
+      const gradeName = t.teamLabel || competitionGrade;
       rowsById[fix.id] = {
         play_hq_id: fix.id,
         type: 'match',
@@ -8260,7 +8321,7 @@ window.importConfirm = async () => {
         time: fix.time || null,
         finish_date: fix.date,
         location: fix.venue || null,
-        description: `Round ${fix.round || '—'} · ${gradeName} · Imported from PlayHQ`,
+        description: `Round ${fix.round || '—'} · ${competitionGrade} · Imported from PlayHQ`,
         cost: 0,
         grade: gradeName,
         grade_id: fix.gradeId || t.teamId,
