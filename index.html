@@ -1692,10 +1692,18 @@ const CLUB_CONFIG = {
   mapsUrl:         'https://maps.app.goo.gl/wxXAPogLwKxnuXSM6',
   registrationUrl: 'https://www.playhq.com/cricket-australia/org/laurimar-cricket-club/b86d295c/register',
   shopUrl:         'https://www.playhq.com/cricket-australia/org/laurimar-cricket-club/b86d295c/shop',
+  // This club's playhq-sync Worker (fixture import proxy + nightly auto-sync).
+  // Each club gets its own Worker deployment — see wrangler-playhq-sync.toml.
+  playhqSyncUrl:   'https://playhq-sync.thomsonseth.workers.dev',
   contacts: [
     { role: 'President', name: 'Jason Merrett', phone: '0402 271 890', email: 'laurimarcc.president@gmail.com' },
     { role: 'Secretary', name: 'Shannon Wells', phone: '0439 430 304', email: 'laurimar.cricketclub@gmail.com' },
   ],
+  // Manually-scheduled match dropdowns. matchGrades is only a STARTING list for
+  // a club with no fixtures yet — once fixtures are imported, the real PlayHQ
+  // grade names are merged in automatically (see matchGradeOptions()).
+  matchFormats: ['2 Day match', 'One Day match', 'T20 match', 'Practice match'],
+  matchGrades:  ['1st XI', '2nd XI', '3rd XI', '4th XI', '5th XI', 'Vets'],
   estYear: '2017',
   poweredBy: 'Lucidigi',
   appUrl: 'https://laurimar-power.netlify.app',
@@ -4675,6 +4683,29 @@ function buildTimeSelect(id, currentVal, onchangeHandler) {
   </div>`;
 }
 
+// Dropdown options for a manually-scheduled match. Both lists are built from
+// what the club actually uses — every grade/format already on an event,
+// including PlayHQ-imported fixtures — merged with the CLUB_CONFIG starting
+// list. That way a newly onboarded club sees sensible defaults immediately and
+// its real competition grades appear by themselves after the first import,
+// with no per-club code changes. `current` is always retained so editing an
+// event whose value is no longer in use can't silently drop it.
+function matchOptionList(configList, eventField, current) {
+  const used = state.events
+    .map(e => e[eventField])
+    .filter(v => typeof v === 'string' && v.trim());
+  return [...new Set([...(configList || []), ...used, ...(current ? [current] : [])])]
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+}
+
+function matchGradeOptions(current) {
+  return matchOptionList(CLUB_CONFIG.matchGrades, 'grade', current);
+}
+
+function matchFormatOptions(current) {
+  return matchOptionList(CLUB_CONFIG.matchFormats, 'format', current);
+}
+
 // ── CREATE EVENT ──────────────────────────────────────────────────────────
 function buildCreateEvent() {
   const f = state.createEventForm;
@@ -4702,10 +4733,8 @@ function buildCreateEvent() {
       <label class="input-label">Format</label>
       <select id="ce-format" onchange="saveCEField('format', this.value)">
         <option value=""      ${!f.format?'selected':''}>Select format</option>
-        <option value="2 Day match"    ${f.format==='2 Day match'?'selected':''}>2 Day match</option>
-        <option value="One Day match"  ${f.format==='One Day match'?'selected':''}>One Day match</option>
-        <option value="T20 match"      ${f.format==='T20 match'?'selected':''}>T20 match</option>
-        <option value="Practice match" ${f.format==='Practice match'?'selected':''}>Practice match</option>
+        ${matchFormatOptions(f.format).map(o => `
+          <option value="${o.replace(/"/g,'&quot;')}" ${f.format===o?'selected':''}>${o}</option>`).join('')}
       </select>
     </div>
 
@@ -4713,12 +4742,8 @@ function buildCreateEvent() {
       <label class="input-label">Grade</label>
       <select id="ce-grade" onchange="saveCEField('grade', this.value)">
         <option value=""       ${!f.grade?'selected':''}>Select grade</option>
-        <option value="1st XI" ${f.grade==='1st XI'?'selected':''}>1st XI</option>
-        <option value="2nd XI" ${f.grade==='2nd XI'?'selected':''}>2nd XI</option>
-        <option value="3rd XI" ${f.grade==='3rd XI'?'selected':''}>3rd XI</option>
-        <option value="4th XI" ${f.grade==='4th XI'?'selected':''}>4th XI</option>
-        <option value="5th XI" ${f.grade==='5th XI'?'selected':''}>5th XI</option>
-        <option value="Vets"   ${f.grade==='Vets'?'selected':''}>Vets</option>
+        ${matchGradeOptions(f.grade).map(o => `
+          <option value="${o.replace(/"/g,'&quot;')}" ${f.grade===o?'selected':''}>${o}</option>`).join('')}
       </select>
     </div>
 
@@ -8120,7 +8145,7 @@ window.reinstateSession = (id) => {
 // ── PLAYHQ API PROXY ─────────────────────────────────────────────────────
 // In Live mode, requests go through the playhq-sync Cloudflare Worker, which
 // holds the PlayHQ API key server-side and handles CORS + pagination.
-const PLAYHQ_PROXY = 'https://playhq-sync.thomsonseth.workers.dev';
+const PLAYHQ_PROXY = CLUB_CONFIG.playhqSyncUrl;
 
 async function playHQGet(path) {
   const res = await fetch(`${PLAYHQ_PROXY}${path}`);
@@ -8130,11 +8155,6 @@ async function playHQGet(path) {
   return json;
 }
 
-// Does a PlayHQ team/club name belong to this club? (e.g. "Laurimar")
-const PHQ_CLUB_WORD = CLUB_CONFIG.clubShortName.split(' ')[0].toLowerCase();
-function isClubTeamName(name) {
-  return (name || '').toLowerCase().includes(PHQ_CLUB_WORD);
-}
 
 window.togglePastSeasons = () => {
   state.importFixture.showPastSeasons = !state.importFixture.showPastSeasons;
@@ -8159,13 +8179,14 @@ window.toggleAnnNotification = () => {
 // games count — a team is "fixtured" once it has ≥1 scheduled game.
 function mapPHQGame(g, comp) {
   const comps = Array.isArray(g.competitors) ? g.competitors : [];
-  const home = comps.find(c => c.isHomeTeam)?.name;
+  const homeComp = comps.find(c => c.isHomeTeam);
   const away = comps.find(c => !c.isHomeTeam)?.name;
   const roundMatch = String(g.round?.name || g.round?.abbreviatedName || '').match(/\d+/);
   return {
     id: g.id,
     round: roundMatch ? Number(roundMatch[0]) : null,
-    homeTeam: home || 'TBC',
+    homeTeam: homeComp?.name || 'TBC',
+    homeTeamId: homeComp?.id || null,
     awayTeam: away || 'TBC',
     date: g.schedule?.date || '',
     time: (g.schedule?.time || '').slice(0,5),
@@ -8224,7 +8245,9 @@ window.importConfirm = async () => {
   if (s.loading || s.importing) return;
 
   // One row per game, keyed by PlayHQ id (a batch upsert must not contain
-  // the same conflict key twice).
+  // the same conflict key twice). Home/away is decided by team ID membership,
+  // not name matching — club-agnostic and derby-safe.
+  const clubTeamIds = new Set(s.summary.map(t => t.teamId));
   const rowsById = {};
   s.summary.forEach(t => {
     t.fixtures.forEach(fix => {
@@ -8244,7 +8267,7 @@ window.importConfirm = async () => {
         round: fix.round || null,
         home_team: fix.homeTeam,
         away_team: fix.awayTeam,
-        home_away: isClubTeamName(fix.homeTeam) ? 'Home' : 'Away',
+        home_away: clubTeamIds.has(fix.homeTeamId) ? 'Home' : 'Away',
         from_schedule: true,
       };
     });
