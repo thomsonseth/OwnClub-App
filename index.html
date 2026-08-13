@@ -1753,6 +1753,10 @@ const CLUB_CONFIG = {
   // tab. Rename both for a club that calls them something else.
   unofficialMatchFormat: 'Practice match',
   unofficialMatchLabel:  'Unofficial Matches',
+  // Formats for official (PlayHQ) fixtures. PlayHQ's public API doesn't
+  // expose the match format, so an admin sets it on the fixture — these are
+  // the choices offered. Change the list for a club playing other formats.
+  matchFormats: ['2 Day match', 'One Day match', 'T20 match'],
   // Only a STARTING list for the manual-match grade dropdown, for a club with
   // no fixtures yet — once fixtures are imported the club's real team names
   // are merged in automatically (see matchGradeOptions()).
@@ -1978,6 +1982,18 @@ const sb = {
   async update(table, data, match) {
     const q = Object.entries(match).map(([k,v]) => `${k}=eq.${v}`).join('&');
     const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${q}`, {
+      method: 'PATCH',
+      headers: sb._h(),
+      body: JSON.stringify(data),
+    });
+    return r.json();
+  },
+
+  // PATCH with a raw PostgREST filter — the match-object form of update()
+  // can only express column=eq.value and doesn't URL-encode, so it can't
+  // handle things like `play_hq_id=not.is.null` or a grade containing spaces.
+  async updateWhere(table, data, query) {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${query}`, {
       method: 'PATCH',
       headers: sb._h(),
       body: JSON.stringify(data),
@@ -3148,6 +3164,7 @@ function blankCreateEventForm() {
     category: 'social', title: '', date: '', time: '', finishTime: '', finishDate: '', location: '',
     description: '', hasCost: false, cost: '', recipients: 'all',
     opponent: '', gender: '', format: '', grade: '', homeAway: 'Home',
+    applyFormatToGrade: false,   // bulk-set match type across a grade's fixtures
     image: null, aiPrompt: '', aiGenerating: false, aiImage: null,
     imageTab: 'upload',
     notifications: { immediate: false, weekly: false, oneWeekBefore: false, oneDayBefore: false },
@@ -3168,6 +3185,8 @@ async function handleCreateEvent() {
   const matchTitle = isMatch
     ? (f.homeAway === 'Away' ? `${f.opponent} vs ${CLUB_CONFIG.clubShortName}` : `${CLUB_CONFIG.clubShortName} vs ${f.opponent}`)
     : f.title;
+
+  let bulkFormatCount = 0;   // fixtures touched by "apply to all <grade>"
 
   if (state.editingEventId) {
     // ── UPDATE existing event ──
@@ -3204,6 +3223,21 @@ async function handleCreateEvent() {
       ev.notifications = { ...f.notifications };
       // Persist to Supabase
       sb.update('events', eventToRow(ev), { id: ev.id });
+
+      // Optionally stamp the same match type across every imported fixture in
+      // this grade — otherwise setting it means editing each fixture in turn.
+      // Scoped to PlayHQ-backed events so unofficial matches keep their own
+      // type. The nightly sync never writes `format`, so this survives.
+      if (isMatch && f.applyFormatToGrade && ev.playHQId && ev.grade) {
+        const grade = ev.grade, format = f.format || null;
+        state.events.forEach(e => {
+          if (e.playHQId && e.grade === grade) { e.format = format; bulkFormatCount++; }
+        });
+        sb.updateWhere('events',
+          { format },
+          `grade=eq.${encodeURIComponent(grade)}&play_hq_id=not.is.null`
+        ).catch(() => showToast('Could not update the whole grade — try again.'));
+      }
       // Send notification if immediate ticked
       if (f.notifications?.immediate) {
         sendPushNotification(
@@ -3216,7 +3250,9 @@ async function handleCreateEvent() {
     const editedId = state.editingEventId;
     state.editingEventId = null;
     state.createEventForm = blankCreateEventForm();
-    showToast(isMatch ? 'Match updated!' : 'Event updated!');
+    showToast(bulkFormatCount > 1
+      ? `Match type set for ${bulkFormatCount} fixtures.`
+      : (isMatch ? 'Match updated!' : 'Event updated!'));
     state.activeEventId = editedId;
     navigate('eventdetail');
     // Edit is only reachable from eventdetail (see openEditEvent), so
@@ -4928,6 +4964,14 @@ function matchGradeOptions(current) {
   return matchOptionList(CLUB_CONFIG.matchGrades, 'grade', current);
 }
 
+// Match types offered on official fixtures. The club's own configured list,
+// plus any type already in use — so a value typed once at another club, or
+// carried in from an older event, stays selectable.
+function matchFormatOptions(current) {
+  return matchOptionList(CLUB_CONFIG.matchFormats, 'format', current)
+    .filter(o => o !== CLUB_CONFIG.unofficialMatchFormat || o === current);
+}
+
 // Which accordion a match sits under in the Matches tab. Anything not backed
 // by a PlayHQ fixture is a manually-scheduled unofficial match and groups
 // together, rather than mixing in with that team's official fixtures.
@@ -4994,9 +5038,27 @@ function buildCreateEvent() {
       </div>
     </div>
 
-    ${isImportedFixture ? '' : `
+    ${isImportedFixture ? `
     <div class="input-group">
-      <label class="input-label">Format</label>
+      <label class="input-label">Match type</label>
+      <select id="ce-format" onchange="saveCEField('format', this.value)">
+        <option value="" ${!f.format?'selected':''}>Not set</option>
+        ${matchFormatOptions(f.format).map(o => `
+          <option value="${o.replace(/"/g,'&quot;')}" ${f.format===o?'selected':''}>${o}</option>`).join('')}
+      </select>
+      <div style="font-size:11px;color:var(--text-dim);margin-top:4px;">
+        PlayHQ's public API doesn't publish the match type, so set it here. It won't be overwritten by the nightly sync.
+      </div>
+      ${f.grade ? `
+        <div class="notif-option" style="margin-top:8px;" onclick="toggleApplyFormatToGrade()">
+          <div class="notif-checkbox ${f.applyFormatToGrade?'checked':''}">
+            ${f.applyFormatToGrade ? `<svg viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="3" width="13" height="13"><polyline points="20 6 9 17 4 12"/></svg>` : ''}
+          </div>
+          <span class="notif-label">Apply to all ${f.grade} fixtures</span>
+        </div>` : ''}
+    </div>` : `
+    <div class="input-group">
+      <label class="input-label">Match type</label>
       <div class="input-field" style="display:flex;align-items:center;justify-content:space-between;color:var(--text-muted);">
         <span>${f.format || CLUB_CONFIG.unofficialMatchFormat}</span>
         <span style="font-size:11px;color:var(--text-dim);">Unofficial match</span>
@@ -7394,6 +7456,11 @@ window.openScheduleMatch = () => {
   state.error = '';
   navigate('createevent');
   forceBackTarget('events');
+};
+
+window.toggleApplyFormatToGrade = () => {
+  state.createEventForm.applyFormatToGrade = !state.createEventForm.applyFormatToGrade;
+  render();
 };
 
 window.openFollowTeam = () => {
