@@ -122,6 +122,16 @@ function fetchTeamFixture(env, teamId) {
   return playhqFetchAll(env, `/v1/teams/${teamId}/fixture`);
 }
 
+// "McDonnell Park — Oval 1 - East". The surface is only appended when it adds
+// something: some venues repeat the venue name as the surface name.
+function venueLabel(venue) {
+  const name = (venue?.name || "").trim();
+  const surface = (venue?.surfaceName || "").trim();
+  if (!name) return surface || null;
+  if (!surface || surface.toLowerCase() === name.toLowerCase()) return name;
+  return `${name} — ${surface}`;
+}
+
 function roundNumber(round) {
   const m = String(round?.name ?? round?.abbreviatedName ?? "").match(/\d+/);
   return m ? Number(m[0]) : null;
@@ -148,7 +158,11 @@ function mapGame(game, clubTeamIds, team) {
     date,
     time,
     finish_date: date,
-    location: game.venue?.name ?? null,
+    // Venue plus the specific playing surface PlayHQ assigns ("McDonnell Park
+    // — Oval 1 - East"), which is what tells players which ground to walk to.
+    // The " — " separator is what map links split on, so the query stays the
+    // venue itself (see mapsQuery() in index.html).
+    location: venueLabel(game.venue),
     // `grade` groups matches in the app, so it holds the club's own team label
     // ("1st XI") rather than the competition grade ("04 - Dyson Shield"), which
     // stays visible in the description. Keeps imported fixtures and manually
