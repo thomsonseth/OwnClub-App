@@ -4749,7 +4749,7 @@ function buildCreateEvent() {
         <span style="font-size:11px;color:var(--text-dim);">Unofficial match</span>
       </div>
       <div style="font-size:11px;color:var(--text-dim);margin-top:4px;">
-        Official fixtures come from PlayHQ — matches scheduled here are always ${CLUB_CONFIG.unofficialMatchFormat.toLowerCase()}es.
+        Official fixtures come from PlayHQ. Every match scheduled here is recorded as a ${CLUB_CONFIG.unofficialMatchFormat.toLowerCase()}.
       </div>
     </div>`}
 
@@ -8196,8 +8196,9 @@ window.toggleAnnNotification = () => {
 // Generic club-type words that carry no team identity once the club name is
 // already known ("Laurimar CC Spring Black" -> "Spring Black").
 const CLUB_WORDS = new Set([
-  'cc','fc','afc','sc','cfc','club','cricket','football','netball',
-  'soccer','basketball','sports','sporting','association','inc',
+  'cc','fc','afc','sc','cfc','rfc','hc','bc','lc','tc',
+  'club','cricket','football','netball','soccer','basketball','rugby',
+  'hockey','tennis','athletics','athletic','sports','sporting','association','inc',
 ]);
 
 // The short label a club uses for one of its teams, derived by stripping the
