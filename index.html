@@ -1989,6 +1989,7 @@ function profileToUser(p) {
     avatar: p.avatar_url || null,
     onboardingComplete: p.onboarding_complete === true,
     notifyNewMembers: p.notify_new_members !== false,
+    followedTeam: p.followed_team || null,
   };
 }
 
@@ -3860,7 +3861,11 @@ function buildHome() {
   const u = state.user;
   const displayName = u.nickname || u.firstName;
   const isAdmin = u.role === 'Administrator' || u.role === 'Captain';
-  const upcomingMatches = state.events.filter(e => e.type === 'match' && isUpcoming(e.date)).sort((a,b)=>a.date>b.date?1:-1);
+  const upcomingMatches = state.events
+    .filter(e => e.type === 'match' && isUpcoming(e.date) && isFollowedMatch(e))
+    .sort((a,b)=>a.date>b.date?1:-1);
+  const followedTeam = followedTeamOrDefault();
+  const followableTeams = clubTeams();
   const upcomingSocials = state.events.filter(e => e.type === 'social' && isUpcoming(e.date)).sort((a,b)=>a.date>b.date?1:-1);
 
   // Arrow-nav slider builder — shows one card at a time with < > buttons
@@ -3962,7 +3967,14 @@ function buildHome() {
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
             </div>
           </div>
-          ${buildArrowSlider(upcomingMatches, 'match', buildMatchSlideCard, 'No upcoming matches')}
+          ${buildArrowSlider(upcomingMatches, 'match', buildMatchSlideCard,
+            followedTeam ? `No upcoming matches for ${followedTeam}` : 'No upcoming matches')}
+          ${followableTeams.length ? `
+            <div style="display:flex;align-items:center;justify-content:center;gap:6px;margin-top:8px;font-size:13px;color:var(--text-muted);">
+              <span>Showing ${followedTeam}</span>
+              <span style="color:var(--text-dim);">·</span>
+              <span style="color:var(--accent);font-weight:600;cursor:pointer;" onclick="openFollowTeam()">Follow a team</span>
+            </div>` : ''}
         </div>
         <div>
           <div class="section-header" style="margin-bottom:0;">
@@ -4238,7 +4250,13 @@ function buildEvents() {
         state.expandedGrades = new Set(Object.keys(gradeMap));
       }
 
-      cards = Object.entries(gradeMap).map(([gradeName, evs]) => {
+      // The followed team leads the list; everything else keeps its natural
+      // (soonest-fixture) order.
+      const followed = followedTeamOrDefault();
+      const ordered = Object.entries(gradeMap).sort(([a], [b]) =>
+        (b === followed ? 1 : 0) - (a === followed ? 1 : 0));
+
+      cards = ordered.map(([gradeName, evs]) => {
         if (gradeName === '__ungrouped__') {
           return evs.map(ev => buildEventCard(ev, isAdmin)).join('');
         }
@@ -4256,6 +4274,15 @@ function buildEvents() {
             ${isOpen ? `<div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">${evs.map(ev => buildEventCard(ev, isAdmin)).join('')}</div>` : ''}
           </div>`;
       }).join('');
+
+      // Follow link sits immediately above the first group — which is the
+      // followed team once one is chosen.
+      if (clubTeams().length) {
+        cards = `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;font-size:13px;">
+            <span style="color:var(--text-muted);">Following <strong style="color:var(--text);">${followedTeamOrDefault()}</strong></span>
+            <span style="color:var(--accent);font-weight:600;cursor:pointer;" onclick="openFollowTeam()">Follow a team</span>
+          </div>` + cards;
+      }
     } else {
       cards = filtered.map(ev => buildEventCard(ev, isAdmin)).join('');
     }
@@ -4712,6 +4739,37 @@ function matchGradeOptions(current) {
 function matchGroupKey(ev) {
   if (!ev.playHQId) return CLUB_CONFIG.unofficialMatchLabel;
   return ev.grade || '__ungrouped__';
+}
+
+// ── FOLLOWING A TEAM ──────────────────────────────────────────────────────
+// Members follow one team so Home shows that side's fixtures instead of every
+// grade at once. The followable list is derived from the club's imported
+// fixtures — never a hardcoded roster — so it is correct for any club and
+// grows by itself as new teams are fixtured on PlayHQ.
+function clubTeams() {
+  const names = state.events
+    .filter(e => e.type === 'match' && e.playHQId && e.grade)
+    .map(e => e.grade);
+  return [...new Set(names)].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+}
+
+// The team whose fixtures this member sees on Home. Falls back to the club's
+// first team (for a cricket club, naturally the 1st XI) when nothing has been
+// chosen yet, or when a previously followed team no longer has fixtures —
+// e.g. a new season where that side hasn't been graded yet.
+function followedTeamOrDefault() {
+  const teams = clubTeams();
+  const chosen = state.user?.followedTeam;
+  if (chosen && teams.includes(chosen)) return chosen;
+  return teams[0] || null;
+}
+
+// Home shows the followed team's fixtures plus every unofficial match, which
+// are club-wide social/practice occasions rather than one grade's business.
+function isFollowedMatch(ev) {
+  if (!ev.playHQId) return true;
+  const followed = followedTeamOrDefault();
+  return !followed || ev.grade === followed;
 }
 
 // ── CREATE EVENT ──────────────────────────────────────────────────────────
@@ -6001,6 +6059,25 @@ function buildModal() {
       </div>
     </div>`;
   }
+  if (m.type === 'followTeam') {
+    const teams = clubTeams();
+    const current = followedTeamOrDefault();
+    return `<div class="modal-overlay" onclick="closeModal(event)">
+      <div class="modal-sheet">
+        <div class="modal-handle"></div>
+        <div class="modal-title">Follow a team</div>
+        <div class="modal-body">Your Home screen will show this team's fixtures. ${CLUB_CONFIG.unofficialMatchLabel} are always shown to everyone.</div>
+        <div style="display:flex;flex-direction:column;gap:8px;">
+          ${teams.map(t => `
+            <div class="fixture-preview-row ${t===current?'selected':''}" onclick="setFollowedTeam('${t.replace(/'/g,"\\'")}')">
+              <div style="flex:1;"><div class="fixture-preview-title">${t}</div></div>
+              ${t===current ? `<div style="color:var(--accent);font-weight:700;">✓</div>` : ''}
+            </div>`).join('')}
+        </div>
+        <button class="btn-secondary" onclick="closeModal(null, true)">Cancel</button>
+      </div>
+    </div>`;
+  }
   if (m.type === 'logout') {
     return `<div class="modal-overlay" onclick="closeModal(event)">
       <div class="modal-sheet">
@@ -7122,6 +7199,27 @@ window.openScheduleMatch = () => {
   state.error = '';
   navigate('createevent');
   forceBackTarget('events');
+};
+
+window.openFollowTeam = () => {
+  state.modal = { type: 'followTeam' };
+  render();
+};
+
+window.setFollowedTeam = (team) => {
+  if (!state.user) return;
+  state.user.followedTeam = team;
+  // Reset the Home slider — the previous index may not exist in the newly
+  // filtered list.
+  state.matchIdx = 0;
+  state.modal = null;
+  // Persist per-member so the choice follows them across devices.
+  sb.update('profiles', { followed_team: team }, { id: state.user.id })
+    .catch(() => showToast('Saved on this device — could not reach the server.'));
+  const i = state.users.findIndex(u => u.id === state.user.id);
+  if (i >= 0) state.users[i].followedTeam = team;
+  showToast(`Now following ${team}`);
+  render();
 };
 
 window.confirmDeleteEvent = (id) => {
