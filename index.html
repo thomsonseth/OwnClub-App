@@ -1802,8 +1802,8 @@ const state = {
   editingEventId: null,
   importFixture: {
     apiKey: '',
-    orgId: '',
-    mode: 'mock',
+    orgId: localStorage.getItem('clubapp_phq_org') || '',
+    mode: 'live',
     step: 1,
     seasons: [],
     selectedSeasonId: '',
@@ -1928,8 +1928,8 @@ const sb = {
     return r.json();
   },
 
-  async upsert(table, data) {
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+  async upsert(table, data, query = '') {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}${query ? `?${query}` : ''}`, {
       method: 'POST',
       headers: { ...sb._h(), 'Prefer': 'resolution=merge-duplicates,return=representation' },
       body: JSON.stringify(data),
@@ -5004,7 +5004,7 @@ function buildTrainingSchedule() {
 // ── IMPORT FIXTURE (PlayHQ API) ───────────────────────────────────────────
 function buildImportFixture() {
   const s = state.importFixture;
-  const stepLabels = ['Credentials','Season','Grade','Preview'];
+  const stepLabels = ['Setup','Season','Teams','Preview'];
 
   const stepBar = `<div class="import-step-bar">
     ${stepLabels.map((l, i) => {
@@ -5021,31 +5021,22 @@ function buildImportFixture() {
     body = `
       <div style="background:rgba(26,58,143,0.08);border:1px solid rgba(26,58,143,0.3);border-radius:12px;padding:14px;font-size:13px;color:var(--text-muted);line-height:1.6;margin-bottom:4px;">
         <strong style="color:var(--accent);">PlayHQ Public API</strong><br/>
-        Fixtures are pulled directly from PlayHQ using their public REST API.<br/><br/>
-        <strong>To get your credentials:</strong><br/>
-        1. Submit a support request at <span style="color:var(--accent);">support.playhq.com</span><br/>
-        2. PlayHQ will issue your <strong>API Key</strong> (Client ID)<br/>
-        3. Your <strong>Organisation ID</strong> is in your club's PlayHQ URL<br/><br/>
-        <span style="color:var(--text-dim);">Use <strong>Mock mode</strong> to test the full flow without credentials.</span>
+        Fixtures are pulled live from PlayHQ. The club's API key is stored securely on the OwnClub backend — nothing to enter here.<br/><br/>
+        <span style="color:var(--text-dim);">Re-importing is safe: fixtures already in the app are updated, never duplicated.</span>
       </div>
 
       <div class="mode-toggle-row">
-        <button class="mode-btn ${s.mode==='mock'?'active':''}" onclick="setImportMode('mock')">🧪 Mock mode</button>
         <button class="mode-btn ${s.mode==='live'?'active':''}" onclick="setImportMode('live')">🔴 Live API</button>
+        <button class="mode-btn ${s.mode==='mock'?'active':''}" onclick="setImportMode('mock')">🧪 Mock mode</button>
       </div>
 
       ${s.mode === 'live' ? `
         <div class="input-group">
-          <label class="input-label">API Key (Client ID)</label>
-          <input class="input-field" id="imp-apikey" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-            value="${s.apiKey}" oninput="state.importFixture.apiKey=this.value"/>
-        </div>
-        <div class="input-group">
-          <label class="input-label">Organisation ID</label>
+          <label class="input-label">Organisation ID <span style="font-weight:400;color:var(--text-dim);">(only if not configured on the backend)</span></label>
           <input class="input-field" id="imp-orgid" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
             value="${s.orgId}" oninput="state.importFixture.orgId=this.value"/>
           <div style="font-size:11px;color:var(--text-dim);margin-top:4px;">
-            Find this in your club's PlayHQ URL: playhq.com/cricket-australia/org/your-club/<strong>xxxxxxxx</strong>
+            Leave blank to use the backend's configured organisation. PlayHQ can provide the full Organisation ID with your API key.
           </div>
         </div>
       ` : `
@@ -5066,7 +5057,7 @@ function buildImportFixture() {
         onclick="selectImportSeason('${season.id}')">
         <div style="flex:1;">
           <div class="fixture-preview-title">${season.name}</div>
-          <div class="fixture-preview-meta">${season.status} · ${season.association?.name || ''}</div>
+          <div class="fixture-preview-meta">${season.status} · ${season.competition?.name || season.association?.name || ''}</div>
         </div>
         ${s.selectedSeasonId===season.id ? `<div style="color:var(--accent);font-weight:700;">✓</div>` : ''}
       </div>`).join('');
@@ -5083,31 +5074,31 @@ function buildImportFixture() {
       </div>`;
   }
 
-  // ── STEP 3: Grade ──
+  // ── STEP 3: Teams ──
   else if (s.step === 3) {
     const selCount = s.selectedGradeIds.length;
-    const rows = s.grades.map(grade => {
-      const isSel = s.selectedGradeIds.includes(grade.id);
+    const rows = s.grades.map(team => {
+      const isSel = s.selectedGradeIds.includes(team.id);
       return `<div class="fixture-preview-row ${isSel?'selected':''}"
-        onclick="toggleImportGrade('${grade.id}')">
+        onclick="toggleImportGrade('${team.id}')">
         <div class="notif-checkbox ${isSel?'checked':''}" style="flex-shrink:0;">
           ${isSel ? `<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" width="13" height="13"><polyline points="20 6 9 17 4 12"/></svg>` : ''}
         </div>
         <div style="flex:1;">
-          <div class="fixture-preview-title">${grade.name}</div>
-          <div class="fixture-preview-meta">${grade.sport || 'Cricket'} · ${grade.competitionType || ''}</div>
+          <div class="fixture-preview-title">${team.name}</div>
+          <div class="fixture-preview-meta">${team.grade?.name || ''}</div>
         </div>
       </div>`;
     }).join('');
 
     body = `
-      <div style="font-size:14px;color:var(--text-muted);margin-bottom:4px;">Select one or more grades to import fixtures from.</div>
+      <div style="font-size:14px;color:var(--text-muted);margin-bottom:4px;">Select one or more of your club's teams to import fixtures for.</div>
       <div style="display:flex;flex-direction:column;gap:8px;">${rows}</div>
       ${s.error ? `<div class="error-msg">${s.error}</div>` : ''}
       <div style="display:flex;gap:10px;">
         <button class="btn-secondary" style="flex:1;" onclick="importGoStep(2)">← Back</button>
         <button class="btn-primary" style="flex:2;" onclick="importFetchFixtures()" ${selCount===0?'disabled style="opacity:0.4;"':''}>
-          ${s.loading ? 'Loading…' : `Fetch fixtures${selCount > 1 ? ` (${selCount} grades)` : ''} →`}
+          ${s.loading ? 'Loading…' : `Fetch fixtures${selCount > 1 ? ` (${selCount} teams)` : ''} →`}
         </button>
       </div>`;
   }
@@ -5157,8 +5148,8 @@ function buildImportFixture() {
       ${s.error ? `<div class="error-msg">${s.error}</div>` : ''}
       <div style="display:flex;gap:10px;margin-top:4px;">
         <button class="btn-secondary" style="flex:1;" onclick="importGoStep(3)">← Back</button>
-        <button class="btn-primary" style="flex:2;" onclick="importConfirm()" ${selCount===0?'disabled style="opacity:0.4;"':''}>
-          Import ${selCount > 0 ? selCount : ''} fixture${selCount !== 1 ? 's' : ''}
+        <button class="btn-primary" style="flex:2;" onclick="importConfirm()" ${selCount===0||s.loading?'disabled style="opacity:0.4;"':''}>
+          ${s.loading ? 'Importing…' : `Import ${selCount > 0 ? selCount : ''} fixture${selCount !== 1 ? 's' : ''}`}
         </button>
       </div>`;
   }
@@ -8199,9 +8190,9 @@ const MOCK_PHQ_SEASONS = [
   { id: 'season-003', name: '2024/25 Summer Season', status: 'COMPLETE', association: { name: 'Northern Districts Cricket Association' } },
 ];
 const MOCK_PHQ_GRADES = [
-  { id: 'grade-001', name: 'Grade 1 — Open Men\'s',  sport: 'Cricket', competitionType: 'Single Day' },
-  { id: 'grade-002', name: 'Grade 2 — Open Men\'s',  sport: 'Cricket', competitionType: 'Single Day' },
-  { id: 'grade-003', name: 'Under 16 — Boys',        sport: 'Cricket', competitionType: 'Twenty20' },
+  { id: 'grade-001', name: 'Laurimar Power CC 1st XI',  grade: { id: 'grade-001', name: 'Grade 1 — Open Men\'s' } },
+  { id: 'grade-002', name: 'Laurimar Power CC 2nd XI',  grade: { id: 'grade-002', name: 'Grade 2 — Open Men\'s' } },
+  { id: 'grade-003', name: 'Laurimar Power U16',        grade: { id: 'grade-003', name: 'Under 16 — Boys' } },
 ];
 const MOCK_PHQ_FIXTURES = {
   'season-001': {
@@ -8262,14 +8253,22 @@ const MOCK_PHQ_FIXTURES = {
 };
 
 // ── PLAYHQ API PROXY ─────────────────────────────────────────────────────
-// In Live mode, requests go through your Cloudflare Worker (avoids CORS).
-// Replace the URL below with your deployed Worker URL after setup.
-const PLAYHQ_PROXY = 'https://playhq-proxy.YOUR_SUBDOMAIN.workers.dev';
+// In Live mode, requests go through the playhq-sync Cloudflare Worker, which
+// holds the PlayHQ API key server-side and handles CORS + pagination.
+const PLAYHQ_PROXY = 'https://playhq-sync.thomsonseth.workers.dev';
 
 async function playHQGet(path) {
   const res = await fetch(`${PLAYHQ_PROXY}${path}`);
-  if (!res.ok) throw new Error(`PlayHQ API error ${res.status}`);
-  return res.json();
+  let json = null;
+  try { json = await res.json(); } catch(e) {}
+  if (!res.ok) throw new Error(json?.error || `PlayHQ API error ${res.status}`);
+  return json;
+}
+
+// Does a PlayHQ team/club name belong to this club? (e.g. "Laurimar")
+const PHQ_CLUB_WORD = CLUB_CONFIG.clubShortName.split(' ')[0].toLowerCase();
+function isClubTeamName(name) {
+  return (name || '').toLowerCase().includes(PHQ_CLUB_WORD);
 }
 
 window.setImportMode = (mode) => {
@@ -8310,10 +8309,6 @@ window.toggleAnnNotification = () => {
 
 window.importFetchSeasons = async () => {
   const s = state.importFixture;
-  if (s.mode === 'live' && (!s.apiKey || !s.orgId)) {
-    state.importFixture.error = 'Please enter your API Key and Organisation ID.';
-    render(); return;
-  }
   state.importFixture.loading = true;
   state.importFixture.error = '';
   render();
@@ -8324,7 +8319,9 @@ window.importFetchSeasons = async () => {
       await new Promise(r => setTimeout(r, 800)); // simulate latency
       seasons = MOCK_PHQ_SEASONS;
     } else {
-      const data = await playHQGet(`/v1/organisations/${s.orgId}/seasons`);
+      const org = s.orgId.trim();
+      try { localStorage.setItem('clubapp_phq_org', org); } catch(e) {}
+      const data = await playHQGet(`/seasons${org ? `?org=${encodeURIComponent(org)}` : ''}`);
       seasons = data.data;
     }
     state.importFixture.seasons = seasons;
@@ -8350,8 +8347,11 @@ window.importFetchGrades = async () => {
       await new Promise(r => setTimeout(r, 600));
       grades = MOCK_PHQ_GRADES;
     } else {
-      const data = await playHQGet(`/v1/seasons/${s.selectedSeasonId}/grades`);
+      // The proxy returns the club's TEAMS for the season (PlayHQ's public
+      // API only exposes fixtures per team, not per grade).
+      const data = await playHQGet(`/teams?season=${encodeURIComponent(s.selectedSeasonId)}`);
       grades = data.data;
+      if (!grades.length) throw new Error('No club teams found in this season yet — check the fixture has been published on PlayHQ.');
     }
     state.importFixture.grades = grades;
     state.importFixture.selectedGradeIds = [];   // reset multi-select
@@ -8383,20 +8383,33 @@ window.importFetchFixtures = async () => {
         };
       }
     } else {
-      for (const gradeId of s.selectedGradeIds) {
-        const grade = s.grades.find(g => g.id === gradeId);
-        const data = await playHQGet(`/v1/grades/${gradeId}/fixture`);
-        fixturesByGrade[gradeId] = {
-          name: grade?.name || gradeId,
-          fixtures: data.data.map(g => ({
+      // One PlayHQ game can appear in two selected teams' fixtures (club
+      // derby) — track seen ids so it's only listed once.
+      const seenGameIds = new Set();
+      for (const teamId of s.selectedGradeIds) {
+        const team = s.grades.find(g => g.id === teamId);
+        const data = await playHQGet(`/fixture?team=${encodeURIComponent(teamId)}`);
+        const fixtures = data.data.map(g => {
+          const comps = Array.isArray(g.competitors) ? g.competitors : [];
+          const home = comps.find(c => c.isHomeTeam)?.name;
+          const away = comps.find(c => !c.isHomeTeam)?.name;
+          const roundMatch = String(g.round?.name || g.round?.abbreviatedName || '').match(/\d+/);
+          return {
             id: g.id,
-            round: g.round?.roundNumber,
-            homeTeam: g.homeTeam?.name || 'TBC',
-            awayTeam: g.awayTeam?.name || 'TBC',
-            date: g.dateTime?.split('T')[0] || '',
-            time: g.dateTime?.split('T')[1]?.slice(0,5) || '',
+            round: roundMatch ? Number(roundMatch[0]) : null,
+            homeTeam: home || 'TBC',
+            awayTeam: away || 'TBC',
+            date: g.schedule?.date || '',
+            time: (g.schedule?.time || '').slice(0,5),
             venue: g.venue?.name || 'TBC',
-          })),
+            gradeName: g.grade?.name || team?.grade?.name || null,
+            gradeId: g.grade?.id || team?.grade?.id || null,
+          };
+        }).filter(f => f.date && !seenGameIds.has(f.id));
+        fixtures.forEach(f => seenGameIds.add(f.id));
+        fixturesByGrade[teamId] = {
+          name: team ? `${team.name}${team.grade?.name ? ` — ${team.grade.name}` : ''}` : teamId,
+          fixtures,
         };
       }
     }
@@ -8445,38 +8458,71 @@ window.toggleAllGradeFixtures = (gradeId) => {
   render();
 };
 
-window.importConfirm = () => {
+window.importConfirm = async () => {
   const s = state.importFixture;
-  let importCount = 0;
+  if (s.loading) return;
 
-  // Iterate all grades and their fixtures
-  Object.entries(s.fixturesByGrade).forEach(([gradeId, gradeData]) => {
-    const grade = s.grades.find(g => g.id === gradeId);
+  // Build one row per selected fixture, keyed by PlayHQ id (a batch upsert
+  // must not contain the same conflict key twice).
+  const rowsById = {};
+  Object.entries(s.fixturesByGrade).forEach(([teamId, gradeData]) => {
     gradeData.fixtures
       .filter(f => s.selectedFixtureIds.includes(f.id))
       .forEach(fix => {
-        if (state.events.find(e => e.playHQId === fix.id)) return; // skip duplicates
-        state.events.push({
-          id: 'phq_' + fix.id,
-          playHQId: fix.id,
+        const gradeName = fix.gradeName || gradeData.name;
+        rowsById[fix.id] = {
+          play_hq_id: fix.id,
           type: 'match',
-          grade: gradeData.name,           // stored for grouping in Matches tab
-          gradeId,
           title: `${fix.homeTeam} vs ${fix.awayTeam}`,
           date: fix.date,
-          time: fix.time || '10:00',
-          location: fix.venue,
-          description: `Round ${fix.round || '—'} · ${gradeData.name} · Imported from PlayHQ`,
+          time: fix.time || null,
+          finish_date: fix.date,
+          location: fix.venue || null,
+          description: `Round ${fix.round || '—'} · ${gradeName} · Imported from PlayHQ`,
           cost: 0,
-          rsvp: {},
-          team: [],
-          round: fix.round,
-          homeTeam: fix.homeTeam,
-          awayTeam: fix.awayTeam,
-        });
-        importCount++;
+          grade: gradeName,
+          grade_id: fix.gradeId || teamId,
+          round: fix.round || null,
+          home_team: fix.homeTeam,
+          away_team: fix.awayTeam,
+          home_away: isClubTeamName(fix.homeTeam) ? 'Home' : 'Away',
+          from_schedule: true,
+        };
       });
   });
+  const rows = Object.values(rowsById);
+  let importCount = rows.length;
+
+  if (s.mode === 'mock') {
+    // Mock mode stays local-only — never writes fake fixtures to the database.
+    rows.forEach(row => {
+      if (state.events.find(e => e.playHQId === row.play_hq_id)) { importCount--; return; }
+      state.events.push({ ...rowToEvent(row), id: 'phq_' + row.play_hq_id });
+    });
+  } else {
+    state.importFixture.loading = true;
+    state.importFixture.error = '';
+    render();
+    try {
+      // Idempotent: re-importing updates existing rows in place (matched on
+      // play_hq_id) instead of duplicating them.
+      const saved = await sb.upsert('events', rows, 'on_conflict=play_hq_id');
+      if (!Array.isArray(saved)) throw new Error(saved?.message || 'Save failed');
+      saved.forEach(row => {
+        const ev = rowToEvent(row);
+        const idx = state.events.findIndex(e => e.playHQId === ev.playHQId || e.id === ev.id);
+        if (idx >= 0) state.events[idx] = { ...state.events[idx], ...ev, rsvp: state.events[idx].rsvp, rsvpGuests: state.events[idx].rsvpGuests, team: state.events[idx].team };
+        else state.events.push(ev);
+      });
+      importCount = saved.length;
+    } catch(e) {
+      state.importFixture.loading = false;
+      state.importFixture.error = `Import failed: ${e.message}`;
+      render();
+      return;
+    }
+    state.importFixture.loading = false;
+  }
 
   state.events.sort((a, b) => a.date > b.date ? 1 : -1);
 
