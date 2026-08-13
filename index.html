@@ -1801,9 +1801,6 @@ const state = {
   emailConfirmFinalizing: false,
   editingEventId: null,
   importFixture: {
-    apiKey: '',
-    orgId: localStorage.getItem('clubapp_phq_org') || '',
-    mode: 'live',
     step: 1,
     seasons: [],
     selectedSeasonId: '',
@@ -5004,7 +5001,14 @@ function buildTrainingSchedule() {
 // ── IMPORT FIXTURE (PlayHQ API) ───────────────────────────────────────────
 function buildImportFixture() {
   const s = state.importFixture;
-  const stepLabels = ['Setup','Season','Teams','Preview'];
+  const stepLabels = ['Season','Teams','Preview'];
+
+  // Seasons load automatically when the screen opens — no setup step needed
+  // (credentials live on the playhq-sync Worker).
+  if (s.step === 1 && !s.seasons.length && !s.loading && !s.error) {
+    setTimeout(() => importFetchSeasons(), 0);
+    s.loading = true;
+  }
 
   const stepBar = `<div class="import-step-bar">
     ${stepLabels.map((l, i) => {
@@ -5016,42 +5020,8 @@ function buildImportFixture() {
 
   let body = '';
 
-  // ── STEP 1: Credentials ──
+  // ── STEP 1: Season ──
   if (s.step === 1) {
-    body = `
-      <div style="background:rgba(26,58,143,0.08);border:1px solid rgba(26,58,143,0.3);border-radius:12px;padding:14px;font-size:13px;color:var(--text-muted);line-height:1.6;margin-bottom:4px;">
-        <strong style="color:var(--accent);">PlayHQ Public API</strong><br/>
-        Fixtures are pulled live from PlayHQ. The club's API key is stored securely on the OwnClub backend — nothing to enter here.<br/><br/>
-        <span style="color:var(--text-dim);">Re-importing is safe: fixtures already in the app are updated, never duplicated.</span>
-      </div>
-
-      <div class="mode-toggle-row">
-        <button class="mode-btn ${s.mode==='live'?'active':''}" onclick="setImportMode('live')">🔴 Live API</button>
-        <button class="mode-btn ${s.mode==='mock'?'active':''}" onclick="setImportMode('mock')">🧪 Mock mode</button>
-      </div>
-
-      ${s.mode === 'live' ? `
-        <div class="input-group">
-          <label class="input-label">Organisation ID <span style="font-weight:400;color:var(--text-dim);">(only if not configured on the backend)</span></label>
-          <input class="input-field" id="imp-orgid" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-            value="${s.orgId}" oninput="state.importFixture.orgId=this.value"/>
-          <div style="font-size:11px;color:var(--text-dim);margin-top:4px;">
-            Leave blank to use the backend's configured organisation. PlayHQ can provide the full Organisation ID with your API key.
-          </div>
-        </div>
-      ` : `
-        <div style="background:var(--surface);border-radius:12px;padding:14px;font-size:13px;color:var(--text-muted);">
-          Using mock data — simulates a real PlayHQ response for <strong>Laurimar Power CC</strong> (Grade 1 &amp; Grade 2).
-        </div>
-      `}
-      ${s.error ? `<div class="error-msg">${s.error}</div>` : ''}
-      <button class="btn-primary" onclick="importFetchSeasons()">
-        ${s.loading ? 'Loading…' : 'Fetch seasons →'}
-      </button>`;
-  }
-
-  // ── STEP 2: Season ──
-  else if (s.step === 2) {
     const rows = s.seasons.map(season => `
       <div class="fixture-preview-row ${s.selectedSeasonId===season.id?'selected':''}"
         onclick="selectImportSeason('${season.id}')">
@@ -5063,19 +5033,24 @@ function buildImportFixture() {
       </div>`).join('');
 
     body = `
-      <div style="font-size:14px;color:var(--text-muted);margin-bottom:4px;">Select the season to import fixtures from.</div>
-      <div style="display:flex;flex-direction:column;gap:8px;">${rows}</div>
-      ${s.error ? `<div class="error-msg">${s.error}</div>` : ''}
-      <div style="display:flex;gap:10px;">
-        <button class="btn-secondary" style="flex:1;" onclick="importGoStep(1)">← Back</button>
-        <button class="btn-primary" style="flex:2;" onclick="importFetchGrades()">
-          ${s.loading ? 'Loading…' : 'Fetch grades →'}
+      <div style="background:rgba(26,58,143,0.08);border:1px solid rgba(26,58,143,0.3);border-radius:12px;padding:14px;font-size:13px;color:var(--text-muted);line-height:1.6;margin-bottom:4px;">
+        <strong style="color:var(--accent);">Import from PlayHQ</strong><br/>
+        Pick the season, choose your teams, and import. From then on it's automatic — new games and schedule changes sync to the app overnight, and admins get a notification when new fixtures land.
+      </div>
+      ${s.loading && !s.seasons.length ? `<div style="text-align:center;color:var(--text-muted);padding:24px 0;">Loading seasons from PlayHQ…</div>` : `
+        <div style="font-size:14px;color:var(--text-muted);margin-bottom:4px;">Select the season to import fixtures from.</div>
+        <div style="display:flex;flex-direction:column;gap:8px;">${rows}</div>
+      `}
+      ${s.error ? `<div class="error-msg">${s.error}</div><button class="btn-secondary" onclick="importFetchSeasons()">Retry</button>` : ''}
+      ${s.seasons.length ? `
+        <button class="btn-primary" onclick="importFetchGrades()">
+          ${s.loading ? 'Loading…' : 'Fetch teams →'}
         </button>
-      </div>`;
+      ` : ''}`;
   }
 
-  // ── STEP 3: Teams ──
-  else if (s.step === 3) {
+  // ── STEP 2: Teams ──
+  else if (s.step === 2) {
     const selCount = s.selectedGradeIds.length;
     const rows = s.grades.map(team => {
       const isSel = s.selectedGradeIds.includes(team.id);
@@ -5092,19 +5067,19 @@ function buildImportFixture() {
     }).join('');
 
     body = `
-      <div style="font-size:14px;color:var(--text-muted);margin-bottom:4px;">Select one or more of your club's teams to import fixtures for.</div>
+      <div style="font-size:14px;color:var(--text-muted);margin-bottom:4px;">These teams are in the selected season — all are selected by default.</div>
       <div style="display:flex;flex-direction:column;gap:8px;">${rows}</div>
       ${s.error ? `<div class="error-msg">${s.error}</div>` : ''}
       <div style="display:flex;gap:10px;">
-        <button class="btn-secondary" style="flex:1;" onclick="importGoStep(2)">← Back</button>
+        <button class="btn-secondary" style="flex:1;" onclick="importGoStep(1)">← Back</button>
         <button class="btn-primary" style="flex:2;" onclick="importFetchFixtures()" ${selCount===0?'disabled style="opacity:0.4;"':''}>
           ${s.loading ? 'Loading…' : `Fetch fixtures${selCount > 1 ? ` (${selCount} teams)` : ''} →`}
         </button>
       </div>`;
   }
 
-  // ── STEP 4: Preview & Select ──
-  else if (s.step === 4) {
+  // ── STEP 3: Preview & Select ──
+  else if (s.step === 3) {
     const allFixtures = Object.values(s.fixturesByGrade).flatMap(g => g.fixtures);
     const totalCount = allFixtures.length;
     const selCount = s.selectedFixtureIds.length;
@@ -5147,7 +5122,7 @@ function buildImportFixture() {
       ${gradeGroups || '<div class="empty-state">No fixtures found.</div>'}
       ${s.error ? `<div class="error-msg">${s.error}</div>` : ''}
       <div style="display:flex;gap:10px;margin-top:4px;">
-        <button class="btn-secondary" style="flex:1;" onclick="importGoStep(3)">← Back</button>
+        <button class="btn-secondary" style="flex:1;" onclick="importGoStep(2)">← Back</button>
         <button class="btn-primary" style="flex:2;" onclick="importConfirm()" ${selCount===0||s.loading?'disabled style="opacity:0.4;"':''}>
           ${s.loading ? 'Importing…' : `Import ${selCount > 0 ? selCount : ''} fixture${selCount !== 1 ? 's' : ''}`}
         </button>
@@ -8183,75 +8158,6 @@ window.reinstateSession = (id) => {
 
 // ── PLAYHQ IMPORT FIXTURE HANDLERS ────────────────────────────────────────
 
-// Mock data mirroring real PlayHQ API response shapes
-const MOCK_PHQ_SEASONS = [
-  { id: 'season-001', name: '2026/27 Summer Season', status: 'UPCOMING', association: { name: 'Northern Districts Cricket Association' } },
-  { id: 'season-002', name: '2025/26 Summer Season', status: 'ACTIVE',   association: { name: 'Northern Districts Cricket Association' } },
-  { id: 'season-003', name: '2024/25 Summer Season', status: 'COMPLETE', association: { name: 'Northern Districts Cricket Association' } },
-];
-const MOCK_PHQ_GRADES = [
-  { id: 'grade-001', name: 'Laurimar Power CC 1st XI',  grade: { id: 'grade-001', name: 'Grade 1 — Open Men\'s' } },
-  { id: 'grade-002', name: 'Laurimar Power CC 2nd XI',  grade: { id: 'grade-002', name: 'Grade 2 — Open Men\'s' } },
-  { id: 'grade-003', name: 'Laurimar Power U16',        grade: { id: 'grade-003', name: 'Under 16 — Boys' } },
-];
-const MOCK_PHQ_FIXTURES = {
-  'season-001': {
-    'grade-001': [
-      { id:'s1g1-f01', round:1,  homeTeam:'Laurimar Power CC', awayTeam:'Riverside CC',       date:'2026-10-10', time:'10:00', venue:'Club Oval' },
-      { id:'s1g1-f02', round:2,  homeTeam:'Northside CC',        awayTeam:'Laurimar Power CC', date:'2026-10-17', time:'10:00', venue:'Northside Reserve' },
-      { id:'s1g1-f03', round:3,  homeTeam:'Laurimar Power CC', awayTeam:'Eastfield CC',        date:'2026-10-24', time:'10:00', venue:'Club Oval' },
-      { id:'s1g1-f04', round:4,  homeTeam:'Southpark CC',        awayTeam:'Laurimar Power CC', date:'2026-10-31', time:'10:00', venue:'Southpark Oval' },
-      { id:'s1g1-f05', round:5,  homeTeam:'Laurimar Power CC', awayTeam:'Lakeside CC',         date:'2026-11-07', time:'10:00', venue:'Club Oval' },
-      { id:'s1g1-f06', round:6,  homeTeam:'Western CC',          awayTeam:'Laurimar Power CC', date:'2026-11-14', time:'10:00', venue:'Western Reserve' },
-      { id:'s1g1-f07', round:7,  homeTeam:'Laurimar Power CC', awayTeam:'Hillside CC',         date:'2026-11-21', time:'10:00', venue:'Club Oval' },
-      { id:'s1g1-f08', round:8,  homeTeam:'Bayside CC',          awayTeam:'Laurimar Power CC', date:'2026-11-28', time:'10:00', venue:'Bayside Oval' },
-      { id:'s1g1-f09', round:9,  homeTeam:'Laurimar Power CC', awayTeam:'Parklands CC',        date:'2026-12-05', time:'10:00', venue:'Club Oval' },
-      { id:'s1g1-f10', round:10, homeTeam:'Riverside CC',        awayTeam:'Laurimar Power CC', date:'2026-12-12', time:'10:00', venue:'Riverside Reserve' },
-    ],
-    'grade-002': [
-      { id:'s1g2-f01', round:1,  homeTeam:'Laurimar Power CC 2nd XI', awayTeam:'Riverside CC 2nd XI',  date:'2026-10-10', time:'12:30', venue:'Club Oval — Outer' },
-      { id:'s1g2-f02', round:2,  homeTeam:'Northside CC 2nd XI',        awayTeam:'Laurimar Power CC 2nd XI', date:'2026-10-17', time:'12:30', venue:'Northside Reserve' },
-      { id:'s1g2-f03', round:3,  homeTeam:'Laurimar Power CC 2nd XI', awayTeam:'Eastfield CC 2nd XI',  date:'2026-10-24', time:'12:30', venue:'Club Oval — Outer' },
-      { id:'s1g2-f04', round:4,  homeTeam:'Southpark CC 2nd XI',        awayTeam:'Laurimar Power CC 2nd XI', date:'2026-10-31', time:'12:30', venue:'Southpark Oval' },
-      { id:'s1g2-f05', round:5,  homeTeam:'Laurimar Power CC 2nd XI', awayTeam:'Lakeside CC 2nd XI',   date:'2026-11-07', time:'12:30', venue:'Club Oval — Outer' },
-    ],
-    'grade-003': [
-      { id:'s1g3-f01', round:1,  homeTeam:'Laurimar Power U16',  awayTeam:'Riverside U16',   date:'2026-10-11', time:'09:00', venue:'Club Oval — Juniors' },
-      { id:'s1g3-f02', round:2,  homeTeam:'Northside U16',         awayTeam:'Laurimar Power U16', date:'2026-10-18', time:'09:00', venue:'Northside Reserve' },
-      { id:'s1g3-f03', round:3,  homeTeam:'Laurimar Power U16',  awayTeam:'Eastfield U16',    date:'2026-10-25', time:'09:00', venue:'Club Oval — Juniors' },
-      { id:'s1g3-f04', round:4,  homeTeam:'Southpark U16',         awayTeam:'Laurimar Power U16', date:'2026-11-01', time:'09:00', venue:'Southpark Oval' },
-    ],
-  },
-  'season-002': {
-    'grade-001': [
-      { id:'s2g1-f01', round:1,  homeTeam:'Laurimar Power CC', awayTeam:'Riverside CC',       date:'2026-04-18', time:'10:00', venue:'Club Oval' },
-      { id:'s2g1-f02', round:2,  homeTeam:'Northside CC',        awayTeam:'Laurimar Power CC', date:'2026-04-25', time:'10:00', venue:'Northside Reserve' },
-      { id:'s2g1-f03', round:3,  homeTeam:'Laurimar Power CC', awayTeam:'Eastfield CC',        date:'2026-05-02', time:'10:00', venue:'Club Oval' },
-      { id:'s2g1-f04', round:4,  homeTeam:'Southpark CC',        awayTeam:'Laurimar Power CC', date:'2026-05-09', time:'10:00', venue:'Southpark Oval' },
-      { id:'s2g1-f05', round:5,  homeTeam:'Laurimar Power CC', awayTeam:'Lakeside CC',         date:'2026-05-16', time:'10:00', venue:'Club Oval' },
-      { id:'s2g1-f06', round:6,  homeTeam:'Western CC',          awayTeam:'Laurimar Power CC', date:'2026-05-23', time:'10:00', venue:'Western Reserve' },
-      { id:'s2g1-f07', round:7,  homeTeam:'Laurimar Power CC', awayTeam:'Hillside CC',         date:'2026-05-30', time:'10:00', venue:'Club Oval' },
-      { id:'s2g1-f08', round:8,  homeTeam:'Bayside CC',          awayTeam:'Laurimar Power CC', date:'2026-06-06', time:'10:00', venue:'Bayside Oval' },
-      { id:'s2g1-f09', round:9,  homeTeam:'Laurimar Power CC', awayTeam:'Parklands CC',        date:'2026-06-13', time:'10:00', venue:'Club Oval' },
-      { id:'s2g1-f10', round:10, homeTeam:'Riverside CC',        awayTeam:'Laurimar Power CC', date:'2026-06-20', time:'10:00', venue:'Riverside Reserve' },
-    ],
-    'grade-002': [
-      { id:'s2g2-f01', round:1,  homeTeam:'Laurimar Power CC 2nd XI', awayTeam:'Riverside CC 2nd XI',  date:'2026-04-18', time:'12:30', venue:'Club Oval — Outer' },
-      { id:'s2g2-f02', round:2,  homeTeam:'Northside CC 2nd XI',        awayTeam:'Laurimar Power CC 2nd XI', date:'2026-04-25', time:'12:30', venue:'Northside Reserve' },
-      { id:'s2g2-f03', round:3,  homeTeam:'Laurimar Power CC 2nd XI', awayTeam:'Eastfield CC 2nd XI',  date:'2026-05-02', time:'12:30', venue:'Club Oval — Outer' },
-    ],
-  },
-  'season-003': {
-    'grade-001': [
-      { id:'s3g1-f01', round:1,  homeTeam:'Laurimar Power CC', awayTeam:'Riverside CC',       date:'2025-10-11', time:'10:00', venue:'Club Oval' },
-      { id:'s3g1-f02', round:2,  homeTeam:'Northside CC',        awayTeam:'Laurimar Power CC', date:'2025-10-18', time:'10:00', venue:'Northside Reserve' },
-      { id:'s3g1-f03', round:3,  homeTeam:'Laurimar Power CC', awayTeam:'Eastfield CC',        date:'2025-10-25', time:'10:00', venue:'Club Oval' },
-      { id:'s3g1-f04', round:4,  homeTeam:'Southpark CC',        awayTeam:'Laurimar Power CC', date:'2025-11-01', time:'10:00', venue:'Southpark Oval' },
-      { id:'s3g1-f05', round:5,  homeTeam:'Laurimar Power CC', awayTeam:'Lakeside CC',         date:'2025-11-08', time:'10:00', venue:'Club Oval' },
-    ],
-  },
-};
-
 // ── PLAYHQ API PROXY ─────────────────────────────────────────────────────
 // In Live mode, requests go through the playhq-sync Cloudflare Worker, which
 // holds the PlayHQ API key server-side and handles CORS + pagination.
@@ -8270,12 +8176,6 @@ const PHQ_CLUB_WORD = CLUB_CONFIG.clubShortName.split(' ')[0].toLowerCase();
 function isClubTeamName(name) {
   return (name || '').toLowerCase().includes(PHQ_CLUB_WORD);
 }
-
-window.setImportMode = (mode) => {
-  state.importFixture.mode = mode;
-  state.importFixture.error = '';
-  render();
-};
 
 window.importGoStep = (step) => {
   state.importFixture.step = step;
@@ -8314,19 +8214,12 @@ window.importFetchSeasons = async () => {
   render();
 
   try {
-    let seasons;
-    if (s.mode === 'mock') {
-      await new Promise(r => setTimeout(r, 800)); // simulate latency
-      seasons = MOCK_PHQ_SEASONS;
-    } else {
-      const org = s.orgId.trim();
-      try { localStorage.setItem('clubapp_phq_org', org); } catch(e) {}
-      const data = await playHQGet(`/seasons${org ? `?org=${encodeURIComponent(org)}` : ''}`);
-      seasons = data.data;
-    }
+    const data = await playHQGet('/seasons');
+    const seasons = data.data;
     state.importFixture.seasons = seasons;
-    state.importFixture.selectedSeasonId = seasons[0]?.id || '';
-    state.importFixture.step = 2;
+    // Pre-select the season most likely wanted: ACTIVE, else UPCOMING, else first.
+    const preferred = seasons.find(x => x.status === 'ACTIVE') || seasons.find(x => x.status === 'UPCOMING') || seasons[0];
+    state.importFixture.selectedSeasonId = preferred?.id || '';
   } catch(e) {
     state.importFixture.error = `Failed to fetch seasons: ${e.message}`;
   }
@@ -8342,22 +8235,16 @@ window.importFetchGrades = async () => {
   render();
 
   try {
-    let grades;
-    if (s.mode === 'mock') {
-      await new Promise(r => setTimeout(r, 600));
-      grades = MOCK_PHQ_GRADES;
-    } else {
-      // The proxy returns the club's TEAMS for the season (PlayHQ's public
-      // API only exposes fixtures per team, not per grade).
-      const data = await playHQGet(`/teams?season=${encodeURIComponent(s.selectedSeasonId)}`);
-      grades = data.data;
-      if (!grades.length) throw new Error('No club teams found in this season yet — check the fixture has been published on PlayHQ.');
-    }
+    // The proxy returns the club's TEAMS for the season (PlayHQ's public
+    // API only exposes fixtures per team, not per grade).
+    const data = await playHQGet(`/teams?season=${encodeURIComponent(s.selectedSeasonId)}`);
+    const grades = data.data;
+    if (!grades.length) throw new Error('No club teams found in this season yet — check the fixture has been published on PlayHQ.');
     state.importFixture.grades = grades;
-    state.importFixture.selectedGradeIds = [];   // reset multi-select
-    state.importFixture.step = 3;
+    state.importFixture.selectedGradeIds = grades.map(g => g.id);   // all teams selected by default
+    state.importFixture.step = 2;
   } catch(e) {
-    state.importFixture.error = `Failed to fetch grades: ${e.message}`;
+    state.importFixture.error = `Failed to fetch teams: ${e.message}`;
   }
   state.importFixture.loading = false;
   render();
@@ -8372,17 +8259,7 @@ window.importFetchFixtures = async () => {
 
   try {
     const fixturesByGrade = {};
-    if (s.mode === 'mock') {
-      await new Promise(r => setTimeout(r, 700));
-      const seasonData = MOCK_PHQ_FIXTURES[s.selectedSeasonId] || {};
-      for (const gradeId of s.selectedGradeIds) {
-        const grade = s.grades.find(g => g.id === gradeId);
-        fixturesByGrade[gradeId] = {
-          name: grade?.name || gradeId,
-          fixtures: (seasonData[gradeId] || []),
-        };
-      }
-    } else {
+    {
       // One PlayHQ game can appear in two selected teams' fixtures (club
       // derby) — track seen ids so it's only listed once.
       const seenGameIds = new Set();
@@ -8414,9 +8291,9 @@ window.importFetchFixtures = async () => {
       }
     }
     state.importFixture.fixturesByGrade = fixturesByGrade;
-    // Pre-select all fixtures across all grades
+    // Pre-select all fixtures across all teams
     state.importFixture.selectedFixtureIds = Object.values(fixturesByGrade).flatMap(g => g.fixtures.map(f => f.id));
-    state.importFixture.step = 4;
+    state.importFixture.step = 3;
   } catch(e) {
     state.importFixture.error = `Failed to fetch fixtures: ${e.message}`;
   }
@@ -8493,13 +8370,7 @@ window.importConfirm = async () => {
   const rows = Object.values(rowsById);
   let importCount = rows.length;
 
-  if (s.mode === 'mock') {
-    // Mock mode stays local-only — never writes fake fixtures to the database.
-    rows.forEach(row => {
-      if (state.events.find(e => e.playHQId === row.play_hq_id)) { importCount--; return; }
-      state.events.push({ ...rowToEvent(row), id: 'phq_' + row.play_hq_id });
-    });
-  } else {
+  {
     state.importFixture.loading = true;
     state.importFixture.error = '';
     render();
@@ -8534,7 +8405,6 @@ window.importConfirm = async () => {
 
   // Reset import state
   state.importFixture = {
-    apiKey: s.apiKey, orgId: s.orgId, mode: s.mode,
     step: 1, seasons: [], selectedSeasonId: '',
     grades: [], selectedGradeIds: [],
     fixturesByGrade: {}, selectedFixtureIds: [],
@@ -8544,7 +8414,7 @@ window.importConfirm = async () => {
   state.activeTab = 'events';
   state.eventsTab = 'matches';
   state.screen = 'events';
-  showToast(`${importCount} fixture${importCount !== 1 ? 's' : ''} imported!`);
+  showToast(`${importCount} fixture${importCount !== 1 ? 's' : ''} imported! New games now sync automatically.`);
   render();
 };
 
