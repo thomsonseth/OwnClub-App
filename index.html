@@ -18,6 +18,9 @@
   html, body {
     overflow: hidden;
     height: 100%;
+    /* Stop the whole page rubber-banding / pull-to-refresh when a swipe or
+       scroll runs past the end of the content inside. */
+    overscroll-behavior: none;
   }
 
   body {
@@ -112,6 +115,9 @@
     overflow-y: auto;
     overflow-x: hidden;
     -webkit-overflow-scrolling: touch;
+    /* Keep overscroll inside this pane — reaching the top and pulling further
+       shouldn't drag the whole app container down. */
+    overscroll-behavior-y: contain;
   }
 
   .screen-scroll::-webkit-scrollbar { display: none; }
@@ -502,6 +508,30 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  /* Carousel — all cards live in one flex track that slides horizontally, so
+     the outgoing card moves off as the incoming one arrives (rather than the
+     content simply being swapped). touch-action:pan-y lets the browser keep
+     handling vertical scrolling while we take horizontal drags. */
+  .slider-viewport {
+    overflow: hidden;
+    touch-action: pan-y;
+  }
+  .slider-track {
+    display: flex;
+    align-items: stretch;
+    transition: transform 0.32s cubic-bezier(0.22, 0.61, 0.36, 1);
+    will-change: transform;
+  }
+  /* No transition while a finger is down — the card tracks the drag. */
+  .slider-track.dragging { transition: none; }
+  .slider-slide {
+    flex: 0 0 100%;
+    width: 100%;
+    min-width: 100%;
+    display: flex;
+  }
+  .slider-slide > .arrow-slider-card { flex: 1; }
+
   /* Dot pager — the card keeps full width and position is shown by dots
      underneath, the way a native carousel does. Swipe the card to move. */
   .slider-dots {
@@ -2846,11 +2876,13 @@ function formatDateShort(dateStr) {
 // event's grade/gender/format fields, skipping any that aren't set (e.g.
 // fixtures imported from PlayHQ that only carry a grade). Pass
 // possessive=true for push notification text ("Mens"/"Womens").
-function buildMatchDescriptor(ev, possessive = false) {
+function buildMatchDescriptor(ev, possessive = false, includeGrade = true) {
   const genderWord = ev.gender === 'Male'   ? (possessive ? 'Mens'   : 'Men')
                     : ev.gender === 'Female' ? (possessive ? 'Womens' : 'Women')
                     : null;
-  return [ev.grade, genderWord, ev.format].filter(Boolean).join(' ');
+  // includeGrade=false is for surfaces that already show the grade elsewhere
+  // (the Home match card leads with it), so it isn't printed twice.
+  return [includeGrade ? ev.grade : null, genderWord, ev.format].filter(Boolean).join(' ');
 }
 
 function formatTime(t) { return t || ''; }
@@ -2933,15 +2965,40 @@ function homeSliderItems(prefix) {
     .sort((a,b) => a.date > b.date ? 1 : -1);
 }
 
-// Paging a slider is an in-place change, not a navigation — render(force)
-// deliberately skips its scroll restore (a new screen should start at the
-// top), which would otherwise fling Home back to the top on every swipe.
-// Capture and put back the scroll position around the rebuild.
-function renderKeepScroll() {
-  const before = document.querySelector('.screen-scroll')?.scrollTop || 0;
-  render(true);
-  const after = document.querySelector('.screen-scroll');
-  if (after) after.scrollTop = before;
+// Dot row for a slider. Windowed to 7 so a long fixture list stays readable;
+// end dots shrink to signal there's more beyond the window.
+function sliderDotsHtml(prefix, count, idx) {
+  if (count <= 1) return '';
+  const MAX = 7;
+  const start = count > MAX ? Math.min(Math.max(idx - 3, 0), count - MAX) : 0;
+  const shown = Math.min(MAX, count);
+  let out = '';
+  for (let i = start; i < start + shown; i++) {
+    const isEdge = (i === start && start > 0) || (i === start + shown - 1 && start + shown < count);
+    out += `<button class="slider-dot ${i === idx ? 'active' : ''} ${isEdge && i !== idx ? 'edge' : ''}"
+      aria-label="Go to ${i + 1} of ${count}" onclick="event.stopPropagation();sliderGo('${prefix}',${i})"></button>`;
+  }
+  return `<div class="slider-dots">${out}</div>`;
+}
+
+// Move a slider to an index by touching the DOM directly. A full re-render
+// would replace the track element, and a brand-new element can't transition
+// from a position it never held — so paging must be applied in place for the
+// slide to animate at all.
+function applySliderPosition(prefix, idx, animate = true) {
+  const vp = document.querySelector(`.slider-viewport[data-slider="${prefix}"]`);
+  const track = vp && vp.querySelector('.slider-track');
+  if (!track) return false;
+  track.classList.toggle('dragging', !animate);
+  track.style.transform = `translateX(${-idx * 100}%)`;
+  const dots = vp.parentElement.querySelector('.slider-dots');
+  if (dots) {
+    const fresh = sliderDotsHtml(prefix, track.children.length, idx);
+    const tmp = document.createElement('div');
+    tmp.innerHTML = fresh;
+    if (tmp.firstElementChild) dots.innerHTML = tmp.firstElementChild.innerHTML;
+  }
+  return true;
 }
 
 function sliderNav(prefix, dir) {
@@ -2949,9 +3006,10 @@ function sliderNav(prefix, dir) {
   const key = prefix + 'Idx';
   const cur = Math.min(state[key] || 0, Math.max(items.length - 1, 0));
   const next = Math.max(0, Math.min(items.length - 1, cur + dir));
-  if (next === cur) return;   // already at an end — don't rebuild for nothing
+  if (next === cur) return;
   state[key] = next;
-  renderKeepScroll();
+  // Falls back to a rebuild only if the track isn't on screen for some reason.
+  if (!applySliderPosition(prefix, next)) render(true);
 }
 window.sliderNav = sliderNav;
 
@@ -2961,26 +3019,62 @@ window.sliderGo = (prefix, idx) => {
   const next = Math.max(0, Math.min(items.length - 1, idx));
   if (next === (state[prefix + 'Idx'] || 0)) return;
   state[prefix + 'Idx'] = next;
-  renderKeepScroll();
+  if (!applySliderPosition(prefix, next)) render(true);
 };
 
-// Swipe the card to page through. Only a clearly horizontal drag counts, so
-// vertical scrolling of the Home screen still works normally.
-let _swipeStart = null;
-window.sliderTouchStart = (e) => {
+// ── Swipe / drag ──────────────────────────────────────────────────────────
+// The card follows the finger, then snaps to the nearest slide on release.
+// The axis is decided once per gesture: a vertical drag is handed back to the
+// page so normal scrolling still works.
+let _drag = null;
+
+window.sliderTouchStart = (e, prefix) => {
   const t = e.touches && e.touches[0];
-  _swipeStart = t ? { x: t.clientX, y: t.clientY } : null;
+  const vp = document.querySelector(`.slider-viewport[data-slider="${prefix}"]`);
+  const track = vp && vp.querySelector('.slider-track');
+  if (!t || !track) { _drag = null; return; }
+  _drag = {
+    prefix, track,
+    x: t.clientX, y: t.clientY,
+    width: vp.clientWidth || 1,
+    count: track.children.length,
+    idx: Math.min(state[prefix + 'Idx'] || 0, track.children.length - 1),
+    axis: null, dx: 0,
+  };
 };
-window.sliderTouchEnd = (e, prefix) => {
-  const s = _swipeStart;
-  _swipeStart = null;
-  const t = e.changedTouches && e.changedTouches[0];
-  if (!s || !t) return;
-  const dx = t.clientX - s.x, dy = t.clientY - s.y;
-  if (Math.abs(dx) < 45 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
-  // A real swipe shouldn't also open the card it started on.
-  e.preventDefault();
-  sliderNav(prefix, dx < 0 ? 1 : -1);
+
+window.sliderTouchMove = (e) => {
+  const d = _drag;
+  const t = e.touches && e.touches[0];
+  if (!d || !t) return;
+  const dx = t.clientX - d.x, dy = t.clientY - d.y;
+  if (!d.axis) {
+    if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;   // too small to judge yet
+    d.axis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
+    if (d.axis === 'x') d.track.classList.add('dragging');
+  }
+  if (d.axis !== 'x') return;
+  e.preventDefault();               // we own this gesture now
+  // Resist dragging past the first/last card so the ends feel like ends.
+  const atStart = d.idx === 0 && dx > 0;
+  const atEnd = d.idx === d.count - 1 && dx < 0;
+  d.dx = (atStart || atEnd) ? dx * 0.28 : dx;
+  d.track.style.transform = `translateX(calc(${-d.idx * 100}% + ${d.dx}px))`;
+};
+
+window.sliderTouchEnd = () => {
+  const d = _drag;
+  _drag = null;
+  if (!d) return;
+  d.track.classList.remove('dragging');   // re-enable the transition for the snap
+  if (d.axis !== 'x') return;
+  // Commit to the next card on a decisive drag: a fifth of the width, or 55px.
+  const threshold = Math.min(d.width * 0.2, 55);
+  let next = d.idx;
+  if (d.dx <= -threshold) next = Math.min(d.idx + 1, d.count - 1);
+  else if (d.dx >= threshold) next = Math.max(d.idx - 1, 0);
+  state[d.prefix + 'Idx'] = next;
+  applySliderPosition(d.prefix, next);
 };
 
 window.goToEventsTab = function(tab) {
@@ -3956,49 +4050,50 @@ function buildHome() {
   // dot) to move through upcoming items. Dots window to a maximum of 7 so a
   // long run of fixtures doesn't produce an unreadable row; the end dots
   // shrink to signal there are more beyond the window.
+  // Carousel: every card is rendered into one horizontal track, and paging
+  // just translates that track — which is what makes the outgoing card slide
+  // away as the next one arrives. Position changes are applied straight to
+  // the DOM (see applySliderPosition) rather than through a full re-render,
+  // because rebuilding the element would drop the CSS transition.
   function buildDotSlider(items, idPrefix, cardBuilder, emptyMsg) {
     if (items.length === 0) return `<div class="empty-state">${emptyMsg}</div>`;
     const count = items.length;
     const idx = Math.min(state[idPrefix + 'Idx'] || 0, count - 1);
-
-    let dots = '';
-    if (count > 1) {
-      const MAX = 7;
-      const start = count > MAX ? Math.min(Math.max(idx - 3, 0), count - MAX) : 0;
-      const shown = Math.min(MAX, count);
-      const buttons = [];
-      for (let i = start; i < start + shown; i++) {
-        const isEdge = (i === start && start > 0) || (i === start + shown - 1 && start + shown < count);
-        buttons.push(`<button class="slider-dot ${i === idx ? 'active' : ''} ${isEdge && i !== idx ? 'edge' : ''}"
-          aria-label="Go to ${i + 1} of ${count}" onclick="event.stopPropagation();sliderGo('${idPrefix}',${i})"></button>`);
-      }
-      dots = `<div class="slider-dots">${buttons.join('')}</div>`;
-    }
+    const slides = items.map(it => `<div class="slider-slide">${cardBuilder(it)}</div>`).join('');
 
     return `
-      <div class="arrow-slider"
-        ontouchstart="sliderTouchStart(event)"
-        ontouchend="sliderTouchEnd(event,'${idPrefix}')">
-        ${cardBuilder(items[idx])}
-        ${dots}
+      <div class="arrow-slider">
+        <div class="slider-viewport" data-slider="${idPrefix}"
+          ontouchstart="sliderTouchStart(event,'${idPrefix}')"
+          ontouchmove="sliderTouchMove(event)"
+          ontouchend="sliderTouchEnd()"
+          ontouchcancel="sliderTouchEnd()">
+          <div class="slider-track" style="transform:translateX(${-idx * 100}%);">${slides}</div>
+        </div>
+        ${sliderDotsHtml(idPrefix, count, idx)}
       </div>`;
   }
 
   // Match card builder
   function buildMatchSlideCard(m) {
     // Short form ("Laurimar v Dennis") — PlayHQ's full names ("Laurimar 1st
-    // XI vs Dennis 1st XI") wrap to two lines on a phone. The grade is on the
-    // descriptor chip below, so nothing is lost.
+    // XI vs Dennis 1st XI") wrap to two lines on a phone. The grade leads the
+    // line above, so nothing is lost.
     const shortTitle = (m.homeTeam && m.awayTeam)
       ? `${shortMatchTeam(m.homeTeam)} v ${shortMatchTeam(m.awayTeam)}`
       : m.title;
+    // Grade first, so which side is playing is the first thing read; the chip
+    // below then carries only what's left (gender/format).
+    const chip = buildMatchDescriptor(m, false, false);
     return `<div class="arrow-slider-card match-slide" onclick="openEvent('${m.id}')" style="display:flex;align-items:stretch;">
       <div style="flex:1;min-width:0;padding:14px;">
-        <div style="font-size:11px;font-weight:600;color:var(--accent);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;">${formatDate(m.date)}</div>
+        <div style="font-size:11px;font-weight:600;color:var(--accent);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+          ${m.grade ? `<span style="color:var(--text);">${m.grade}</span><span style="color:var(--text-dim);"> · </span>` : ''}${formatDate(m.date)}
+        </div>
         <div class="slide-title">${shortTitle}</div>
         <div style="font-size:13px;color:var(--text-muted);display:flex;align-items:center;gap:4px;">${icons.clock} ${formatTime(m.time)}</div>
         <div style="font-size:13px;color:var(--text-muted);display:flex;align-items:center;gap:4px;margin-top:3px;">${icons.mappin} ${m.location}</div>
-        ${buildMatchDescriptor(m) ? `<div style="margin-top:8px;font-size:12px;background:var(--surface2);border-radius:8px;padding:4px 8px;display:inline-block;color:var(--text-muted);">${buildMatchDescriptor(m)}</div>` : ''}
+        ${chip ? `<div style="margin-top:8px;font-size:12px;background:var(--surface2);border-radius:8px;padding:4px 8px;display:inline-block;color:var(--text-muted);">${chip}</div>` : ''}
       </div>
       ${m.image ? `<div style="width:90px;min-width:90px;height:90px;flex-shrink:0;border-radius:10px;overflow:hidden;margin:12px 12px 12px 0;"><img src="${m.image}" style="width:100%;height:100%;object-fit:cover;object-position:center top;display:block;"/></div>` : ''}
     </div>`;
