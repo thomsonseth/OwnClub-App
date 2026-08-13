@@ -487,6 +487,21 @@
     transition: opacity 0.15s;
   }
   .arrow-slider-card:active { opacity: 0.75; }
+  /* Every card in a slider is the same height, so paging through doesn't
+     resize the section and shunt the page around. */
+  .arrow-slider-card.match-slide  { min-height: 132px; }
+  .arrow-slider-card.social-slide { min-height: 132px; }
+  /* Titles stay on one line — a wrapped opponent name was the main thing
+     making cards different heights. */
+  .slide-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 6px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   /* Dot pager — the card keeps full width and position is shown by dots
      underneath, the way a native carousel does. Swipe the card to move. */
   .slider-dots {
@@ -2918,20 +2933,35 @@ function homeSliderItems(prefix) {
     .sort((a,b) => a.date > b.date ? 1 : -1);
 }
 
+// Paging a slider is an in-place change, not a navigation — render(force)
+// deliberately skips its scroll restore (a new screen should start at the
+// top), which would otherwise fling Home back to the top on every swipe.
+// Capture and put back the scroll position around the rebuild.
+function renderKeepScroll() {
+  const before = document.querySelector('.screen-scroll')?.scrollTop || 0;
+  render(true);
+  const after = document.querySelector('.screen-scroll');
+  if (after) after.scrollTop = before;
+}
+
 function sliderNav(prefix, dir) {
   const items = homeSliderItems(prefix);
   const key = prefix + 'Idx';
   const cur = Math.min(state[key] || 0, Math.max(items.length - 1, 0));
-  state[key] = Math.max(0, Math.min(items.length - 1, cur + dir));
-  render(true);
+  const next = Math.max(0, Math.min(items.length - 1, cur + dir));
+  if (next === cur) return;   // already at an end — don't rebuild for nothing
+  state[key] = next;
+  renderKeepScroll();
 }
 window.sliderNav = sliderNav;
 
 // Jump straight to an item by tapping its dot.
 window.sliderGo = (prefix, idx) => {
   const items = homeSliderItems(prefix);
-  state[prefix + 'Idx'] = Math.max(0, Math.min(items.length - 1, idx));
-  render(true);
+  const next = Math.max(0, Math.min(items.length - 1, idx));
+  if (next === (state[prefix + 'Idx'] || 0)) return;
+  state[prefix + 'Idx'] = next;
+  renderKeepScroll();
 };
 
 // Swipe the card to page through. Only a clearly horizontal drag counts, so
@@ -3331,6 +3361,24 @@ function publishTeamSelection() {
 // this matches the format asked for and is easy to adjust later.
 function shortTeamName(name) {
   return (name || '').trim().split(/\s+/)[0] || name || '';
+}
+
+// Compact form of a team name for the Home match card, where the full PlayHQ
+// name wraps to a second line. Drops trailing side designators and generic
+// club words rather than just taking the first word, so multi-word towns
+// survive: "Lower Eltham 1st XI" -> "Lower Eltham", "Dennis 1st XI" ->
+// "Dennis", "Laurimar Cricket Club" -> "Laurimar". Club-agnostic — no club
+// name is hardcoded. (shortTeamName() above is kept as-is: it feeds existing
+// grade-chat titles, which shouldn't change under people mid-season.)
+function shortMatchTeam(name) {
+  const words = (name || '').trim().split(/\s+/).filter(Boolean);
+  const isDesignator = (s) => /^(\d+(st|nd|rd|th)?|xi+|x1|u\d+)$/i.test(s);
+  while (words.length > 1) {
+    const last = words[words.length - 1].toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (isDesignator(last) || CLUB_WORDS.has(last)) words.pop();
+    else break;
+  }
+  return words.join(' ') || (name || '');
 }
 
 // Creates (once a grade first reaches a full XI+reserves) or updates a
@@ -3938,10 +3986,16 @@ function buildHome() {
 
   // Match card builder
   function buildMatchSlideCard(m) {
-    return `<div class="arrow-slider-card" onclick="openEvent('${m.id}')" style="display:flex;align-items:stretch;">
+    // Short form ("Laurimar v Dennis") — PlayHQ's full names ("Laurimar 1st
+    // XI vs Dennis 1st XI") wrap to two lines on a phone. The grade is on the
+    // descriptor chip below, so nothing is lost.
+    const shortTitle = (m.homeTeam && m.awayTeam)
+      ? `${shortMatchTeam(m.homeTeam)} v ${shortMatchTeam(m.awayTeam)}`
+      : m.title;
+    return `<div class="arrow-slider-card match-slide" onclick="openEvent('${m.id}')" style="display:flex;align-items:stretch;">
       <div style="flex:1;min-width:0;padding:14px;">
         <div style="font-size:11px;font-weight:600;color:var(--accent);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;">${formatDate(m.date)}</div>
-        <div style="font-size:16px;font-weight:700;color:var(--text);margin-bottom:6px;">${m.title}</div>
+        <div class="slide-title">${shortTitle}</div>
         <div style="font-size:13px;color:var(--text-muted);display:flex;align-items:center;gap:4px;">${icons.clock} ${formatTime(m.time)}</div>
         <div style="font-size:13px;color:var(--text-muted);display:flex;align-items:center;gap:4px;margin-top:3px;">${icons.mappin} ${m.location}</div>
         ${buildMatchDescriptor(m) ? `<div style="margin-top:8px;font-size:12px;background:var(--surface2);border-radius:8px;padding:4px 8px;display:inline-block;color:var(--text-muted);">${buildMatchDescriptor(m)}</div>` : ''}
@@ -3953,11 +4007,11 @@ function buildHome() {
   // Social card builder with RSVP
   function buildSocialSlideCard(ev) {
     const myRsvp = ev.rsvp?.[state.user?.id];
-    return `<div class="arrow-slider-card" style="display:flex;flex-direction:column;gap:0;">
-      <div style="display:flex;align-items:stretch;">
+    return `<div class="arrow-slider-card social-slide" style="display:flex;flex-direction:column;gap:0;">
+      <div style="display:flex;align-items:stretch;flex:1;">
         <div style="flex:1;min-width:0;padding:14px;cursor:pointer;" onclick="openEvent('${ev.id}')">
           <div style="font-size:11px;font-weight:600;color:var(--accent);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;">${formatDate(ev.date)}</div>
-          <div style="font-size:16px;font-weight:700;color:var(--text);margin-bottom:6px;">${ev.title}</div>
+          <div class="slide-title">${ev.title}</div>
           <div style="font-size:13px;color:var(--text-muted);display:flex;align-items:center;gap:4px;">${icons.clock} ${formatTime(ev.time)}</div>
           <div style="font-size:13px;color:var(--text-muted);display:flex;align-items:center;gap:4px;margin-top:3px;">${icons.mappin} ${ev.location}</div>
           ${ev.cost > 0 ? `<div style="margin-top:4px;font-size:13px;color:var(--teal);font-weight:600;">🎟 $${ev.cost} per person</div>` : ''}
