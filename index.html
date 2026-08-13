@@ -1808,6 +1808,7 @@ const state = {
     seasons: [],
     summary: [],               // fixtured teams: { teamId, teamName, grade, comp, isPast, fixtures[] }
     notFixtured: [],           // registered team names still waiting on a published fixture
+    noTeamComps: [],           // current competitions with no club teams registered yet
     pastSelectedIds: [],       // completed seasons the admin ticked for inclusion
     showPastSeasons: false,
   },
@@ -3006,6 +3007,22 @@ async function handleCreateEvent() {
       ev.location    = f.location;
       ev.description = f.description;
       ev.cost        = f.hasCost ? parseFloat(f.cost) || 0 : 0;
+      if (isMatch) {
+        // Only rebuild the title/team names when the opponent or home-away
+        // actually changed — otherwise a PlayHQ-imported fixture's real team
+        // names (e.g. "Laurimar 1st XI") would get rewritten to the club's
+        // generic short name just by saving an unrelated edit.
+        const origOpponent = (ev.homeAway === 'Away' ? ev.homeTeam : ev.awayTeam) || '';
+        if (f.opponent !== origOpponent || (f.homeAway || 'Home') !== (ev.homeAway || 'Home')) {
+          ev.homeTeam = f.homeAway === 'Away' ? f.opponent : CLUB_CONFIG.clubShortName;
+          ev.awayTeam = f.homeAway === 'Away' ? CLUB_CONFIG.clubShortName : f.opponent;
+          ev.title    = matchTitle;
+        }
+        ev.gender   = f.gender || null;
+        ev.format   = f.format || null;
+        ev.grade    = f.grade || null;
+        ev.homeAway = f.homeAway || null;
+      }
       if (f.image) {
         try { ev.image = await resolveImageForUpload(f.image, `events/${ev.id}`); }
         catch (e) { showToast('Image upload failed — keeping the previous image.'); }
@@ -3025,8 +3042,9 @@ async function handleCreateEvent() {
     const editedId = state.editingEventId;
     state.editingEventId = null;
     state.createEventForm = blankCreateEventForm();
-    showToast('Event updated!');
+    showToast(isMatch ? 'Match updated!' : 'Event updated!');
     state.activeEventId = editedId;
+    navigate('eventdetail');
     // Edit is only reachable from eventdetail (see openEditEvent), so
     // 'eventdetail' is already sitting in navStack from before Edit was
     // tapped — navigate()'s own loop-collapse rule removes the duplicate and
@@ -4788,8 +4806,9 @@ function buildCreateEvent() {
         </div>`).join('')}
     </div>`;
 
-  const screenTitle = isMatch ? 'Schedule Match' : (state.editingEventId ? 'Edit Event' : 'Create Event');
-  const publishLabel = isMatch ? 'Schedule match' : (state.editingEventId ? 'Save changes' : 'Publish event');
+  const editing = !!state.editingEventId;
+  const screenTitle = isMatch ? (editing ? 'Edit Match' : 'Schedule Match') : (editing ? 'Edit Event' : 'Create Event');
+  const publishLabel = isMatch ? (editing ? 'Update match' : 'Schedule match') : (editing ? 'Save changes' : 'Publish event');
 
   return `<div class="screen">
     ${buildTopBanner({ title: screenTitle, showBack: true })}
@@ -5051,6 +5070,13 @@ function buildImportFixture() {
         <div style="background:var(--surface);border-radius:12px;padding:12px 14px;font-size:12px;color:var(--text-dim);line-height:1.6;">
           <strong style="color:var(--text-muted);">Registered but not fixtured yet:</strong> ${s.notFixtured.join(', ')}.<br/>
           Their games will be added automatically once PlayHQ publishes them.
+        </div>
+      ` : ''}
+
+      ${s.noTeamComps.length ? `
+        <div style="background:var(--surface);border-radius:12px;padding:12px 14px;font-size:12px;color:var(--text-dim);line-height:1.6;">
+          <strong style="color:var(--text-muted);">No club teams entered yet:</strong> ${s.noTeamComps.join(', ')}.<br/>
+          Teams appear here once the club is entered into these competitions on PlayHQ (e.g. the women's sides) — their fixtures then sync automatically.
         </div>
       ` : ''}
 
@@ -8177,12 +8203,14 @@ window.importLoadAll = async () => {
 
     const summary = [];
     const notFixtured = [];
+    const noTeamComps = [];
     const seenGameIds = new Set();  // a club derby appears in both teams' fixtures
     for (const seasonId of seasonIds) {
       const season = s.seasons.find(x => x.id === seasonId);
       const comp = season?.competition?.name || season?.association?.name || '';
       const isPast = String(season?.status || '').startsWith('COMPLETE');
       const teams = (await playHQGet(`/teams?season=${encodeURIComponent(seasonId)}`)).data;
+      if (!teams.length && !isPast) noTeamComps.push(comp);
       for (const team of teams) {
         const games = (await playHQGet(`/fixture?team=${encodeURIComponent(team.id)}`)).data;
         const fixtures = games.map(g => mapPHQGame(g, comp)).filter(f => f.date && !seenGameIds.has(f.id));
@@ -8196,6 +8224,7 @@ window.importLoadAll = async () => {
     }
     s.summary = summary;
     s.notFixtured = [...new Set(notFixtured)];
+    s.noTeamComps = [...new Set(noTeamComps)];
     s.loaded = true;
   } catch(e) {
     s.error = `Failed to load fixtures: ${e.message}`;
@@ -8270,7 +8299,7 @@ window.importConfirm = async () => {
   // Reset import state
   state.importFixture = {
     loading: false, loaded: false, importing: false, error: '',
-    seasons: [], summary: [], notFixtured: [],
+    seasons: [], summary: [], notFixtured: [], noTeamComps: [],
     pastSelectedIds: [], showPastSeasons: false,
   };
 
