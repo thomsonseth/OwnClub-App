@@ -72,8 +72,48 @@ async function fetchClubTeams(env, seasonId) {
     .map((t) => ({
       id: t.id,
       name: t.name,
+      clubName: t.club?.name ?? null,
       grade: { id: t.grade?.id ?? null, name: t.grade?.name ?? null },
     }));
+}
+
+// Generic club-type words that carry no team identity once the club name is
+// already known. Used to reduce e.g. "Laurimar CC Spring Black" -> "Spring
+// Black" after the club prefix is stripped.
+const CLUB_WORDS = new Set([
+  "cc", "fc", "afc", "sc", "cfc", "rfc", "hc", "bc", "lc", "tc",
+  "club", "cricket", "football", "netball", "soccer", "basketball", "rugby",
+  "hockey", "tennis", "athletics", "athletic", "sports", "sporting", "association", "inc",
+]);
+
+// The short label a club actually uses for one of its teams, derived by
+// stripping the club name PlayHQ repeats on every team:
+//   "Laurimar 1st XI"          + club "Laurimar Cricket Club" -> "1st XI"
+//   "Laurimar CC Spring Black" + club "Laurimar Cricket Club" -> "Spring Black"
+//   "BUCC Reserves"      + club "Bundoora United Cricket Club" -> "Reserves"
+// When nothing distinguishing is left — the team name IS the club name, as
+// with a single-team Summer Smash entry — the full name is kept.
+// Club-agnostic: derived from PlayHQ's own club name, never a hardcoded word.
+function clubTeamLabel(teamName, clubName) {
+  const t = (teamName || "").trim();
+  const c = (clubName || "").trim();
+  if (!t) return null;
+  if (!c) return t;
+  const tw = t.split(/\s+/);
+  const cw = c.split(/\s+/);
+  let i = 0;
+  while (i < tw.length && i < cw.length && tw[i].toLowerCase() === cw[i].toLowerCase()) i++;
+  if (i >= tw.length) return t; // team name is exactly the club name
+  const acronym = cw.map((w) => w[0]).join("").toLowerCase();
+  let rest = tw.slice(i);
+  while (rest.length) {
+    const w = rest[0].toLowerCase().replace(/[^a-z]/g, "");
+    if (CLUB_WORDS.has(w) || w === acronym) rest = rest.slice(1);
+    else break;
+  }
+  if (!rest.length) return t; // nothing distinguishing left
+  const out = rest.join(" ").trim();
+  return out && out.toLowerCase() !== c.toLowerCase() ? out : t;
 }
 
 // The public API only exposes fixtures per TEAM (there is no per-grade
@@ -92,7 +132,7 @@ function roundNumber(round) {
 // matching, which breaks for clubs whose PlayHQ names differ from their app
 // branding. Game shape: competitors[{id,name,isHomeTeam}],
 // schedule{date,time,timezone}, venue{name}, grade{id,name}, round{name}.
-function mapGame(game, clubTeamIds) {
+function mapGame(game, clubTeamIds, team) {
   const competitors = Array.isArray(game.competitors) ? game.competitors : [];
   const homeComp = competitors.find((c) => c.isHomeTeam);
   const awayComp = competitors.find((c) => !c.isHomeTeam);
@@ -109,8 +149,15 @@ function mapGame(game, clubTeamIds) {
     time,
     finish_date: date,
     location: game.venue?.name ?? null,
-    grade: game.grade?.name ?? null,
+    // `grade` groups matches in the app, so it holds the club's own team label
+    // ("1st XI") rather than the competition grade ("04 - Dyson Shield"), which
+    // stays visible in the description. Keeps imported fixtures and manually
+    // scheduled matches speaking the same vocabulary.
+    grade: clubTeamLabel(team?.name, team?.clubName) ?? game.grade?.name ?? null,
     grade_id: game.grade?.id ?? null,
+    // Not an events column — used only to build the description below, and
+    // stripped by stripMeta() before anything is sent to Supabase.
+    _competitionGrade: game.grade?.name ?? null,
     round: roundNumber(game.round),
     home_team: homeComp.name,
     away_team: awayComp.name,
@@ -126,14 +173,23 @@ async function collectSeasonFixtures(env, seasonId) {
   for (const team of teams) {
     const games = await fetchTeamFixture(env, team.id);
     for (const game of games) {
-      const row = mapGame(game, clubTeamIds);
+      const row = mapGame(game, clubTeamIds, team);
       if (row) byId.set(row.play_hq_id, row);
     }
   }
   return [...byId.values()];
 }
 
-async function upsertEvents(env, events) {
+// Drop internal `_`-prefixed helper fields — PostgREST rejects any key that
+// isn't a real column.
+function stripMeta(row) {
+  const out = {};
+  for (const [k, v] of Object.entries(row)) if (!k.startsWith("_")) out[k] = v;
+  return out;
+}
+
+async function upsertEvents(env, rows) {
+  const events = rows.map(stripMeta);
   if (events.length === 0) return 0;
   const res = await fetch(`${env.SUPABASE_URL}/rest/v1/events?on_conflict=play_hq_id`, {
     method: "POST",
@@ -217,7 +273,7 @@ async function runSync(env) {
     .filter((r) => !imported.has(r.play_hq_id))
     .map((r) => ({
       ...r,
-      description: `Round ${r.round ?? "—"} · ${r.grade ?? ""} · Imported from PlayHQ`,
+      description: `Round ${r.round ?? "—"} · ${r._competitionGrade || r.grade || ""} · Imported from PlayHQ`,
       cost: 0,
     }));
   const updateRows = fixtures.filter((r) => imported.has(r.play_hq_id));
