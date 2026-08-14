@@ -180,16 +180,60 @@ function mapGame(game, clubTeamIds, team) {
   };
 }
 
+function addDays(isoDate, n) {
+  const d = new Date(`${isoDate}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+// PlayHQ's public API does not publish the match type (One Day / Two Day) —
+// it's only on their website, via a private endpoint. It is, however,
+// derivable from the fixture itself: a two-day game occupies this Saturday
+// AND the next, so the following round cannot start for 14 days, whereas a
+// one-day game is followed a week later.
+//
+// Only trusted when the next round number is consecutive: a skipped round
+// means a bye, which produces the same 14-day gap for a different reason.
+// Anything ambiguous (a mid-season break, the final round) is left unset
+// rather than guessed, for an admin to fill in.
+//
+// Opt-in per club via PLAYHQ_TWO_DAY_FORMAT — without it this does nothing,
+// so a club running fortnightly fixtures isn't told every game is two-day.
+// Writes to `_format` (meta): the nightly sync applies it to new games only,
+// so an admin's own correction is never overwritten.
+function deriveMatchTypes(env, rows) {
+  const twoDay = env.PLAYHQ_TWO_DAY_FORMAT;
+  const oneDay = env.PLAYHQ_ONE_DAY_FORMAT;
+  if (!twoDay) return;
+  const sorted = [...rows].sort((a, b) => (a.date < b.date ? -1 : 1));
+  for (let i = 0; i < sorted.length; i++) {
+    const g = sorted[i];
+    const next = sorted[i + 1];
+    if (!next || g.round == null || next.round !== g.round + 1) continue;
+    const gap = (Date.parse(next.date) - Date.parse(g.date)) / 86400000;
+    if (gap <= 7) {
+      if (oneDay) g._format = oneDay;
+    } else if (gap === 14) {
+      g._format = twoDay;
+      g.finish_date = addDays(g.date, 7); // day two
+    }
+  }
+}
+
 async function collectSeasonFixtures(env, seasonId) {
   const teams = await fetchClubTeams(env, seasonId);
   const clubTeamIds = new Set(teams.map((t) => t.id));
   const byId = new Map(); // dedupe: two club teams facing each other share one game
   for (const team of teams) {
     const games = await fetchTeamFixture(env, team.id);
+    const rows = [];
     for (const game of games) {
       const row = mapGame(game, clubTeamIds, team);
-      if (row) byId.set(row.play_hq_id, row);
+      if (row) rows.push(row);
     }
+    // Derived per team: the gap rule only holds within one team's own fixture.
+    deriveMatchTypes(env, rows);
+    for (const row of rows) byId.set(row.play_hq_id, row);
   }
   return [...byId.values()];
 }
@@ -289,7 +333,12 @@ async function runSync(env) {
       ...r,
       description: `Round ${r.round ?? "—"} · ${r._competitionGrade || r.grade || ""} · Imported from PlayHQ`,
       cost: 0,
+      // Derived match type, applied only when a game is first seen. Always
+      // present so the batch has uniform columns.
+      format: r._format ?? null,
     }));
+  // Updates deliberately carry no `format` column, so an admin's own match
+  // type survives every future sync.
   const updateRows = fixtures.filter((r) => imported.has(r.play_hq_id));
 
   // Two upserts: PostgREST bulk requests need uniform columns per batch.

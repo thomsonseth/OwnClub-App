@@ -38,5 +38,12 @@ enabled = true
 # PLAYHQ_ORG_ID is unset — use the club name AS IT APPEARS ON PLAYHQ, which may
 # differ from the app's branding (e.g. "Bundoora United", not "BUCC").
 PLAYHQ_CLUB_NAME = "Laurimar"
+# Match type is not published by PlayHQ's public API, so it's derived from the
+# fixture's round spacing (a two-day game pushes the next round out 14 days).
+# Set BOTH to enable; leave PLAYHQ_TWO_DAY_FORMAT unset for a club whose
+# competition isn't one/two-day — e.g. fortnightly fixtures would otherwise
+# all be labelled two-day. Values should match CLUB_CONFIG.matchFormats.
+PLAYHQ_ONE_DAY_FORMAT = "One Day match"
+PLAYHQ_TWO_DAY_FORMAT = "2 Day match"
 ONESIGNAL_PROXY_URL = "https://onesignal-proxy.thomsonseth.workers.dev"
 APP_URL = "https://laurimar-power.netlify.app"
