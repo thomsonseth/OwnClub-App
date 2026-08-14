@@ -45,5 +45,9 @@ PLAYHQ_CLUB_NAME = "Laurimar"
 # all be labelled two-day. Values should match CLUB_CONFIG.matchFormats.
 PLAYHQ_ONE_DAY_FORMAT = "One Day match"
 PLAYHQ_TWO_DAY_FORMAT = "2 Day match"
+# The final round of a grade has no following round to measure against — the
+# one case the calendar can't decide. This states the club's convention for it.
+# Unset it to leave the last round blank for an admin instead.
+PLAYHQ_LAST_ROUND_FORMAT = "One Day match"
 ONESIGNAL_PROXY_URL = "https://onesignal-proxy.thomsonseth.workers.dev"
 APP_URL = "https://laurimar-power.netlify.app"

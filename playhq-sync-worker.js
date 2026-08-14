@@ -187,52 +187,96 @@ function addDays(isoDate, n) {
 }
 
 // PlayHQ's public API does not publish the match type (One Day / Two Day) —
-// it's only on their website, via a private endpoint. It is, however,
-// derivable from the fixture itself: a two-day game occupies this Saturday
-// AND the next, so the following round cannot start for 14 days, whereas a
-// one-day game is followed a week later.
+// it exists only on their website, behind a private endpoint with
+// introspection disabled. It is, however, determined by the GRADE's round
+// calendar: a two-day game occupies its date and the following week, so the
+// grade's next round cannot begin for a fortnight, whereas a one-day round is
+// followed a week later.
 //
-// Only trusted when the next round number is consecutive: a skipped round
-// means a bye, which produces the same 14-day gap for a different reason.
-// Anything ambiguous (a mid-season break, the final round) is left unset
-// rather than guessed, for an admin to fill in.
+// The calendar is read from the whole grade (/v1/grades/:id/games), not just
+// our own team's fixture, so a bye or an unscheduled game for our side can't
+// shift the spacing and produce a wrong answer.
 //
-// Opt-in per club via PLAYHQ_TWO_DAY_FORMAT — without it this does nothing,
-// so a club running fortnightly fixtures isn't told every game is two-day.
-// Writes to `_format` (meta): the nightly sync applies it to new games only,
-// so an admin's own correction is never overwritten.
-function deriveMatchTypes(env, rows) {
+// Opt in per club with PLAYHQ_TWO_DAY_FORMAT — without it this does nothing,
+// so a sport running fortnightly fixtures isn't told every game is two-day.
+// Results go to `_format` (meta): the sync applies them to new games only, so
+// an admin's own correction is never overwritten.
+function buildRoundCalendar(games) {
+  const earliest = new Map(); // round -> first date that round is played
+  for (const g of games) {
+    const date = g.schedule?.date;
+    const key = g.round?.id || g.round?.name;
+    if (!date || !key) continue;
+    if (!earliest.has(key) || date < earliest.get(key)) earliest.set(key, date);
+  }
+  return [...earliest.entries()]
+    .map(([id, date]) => ({ id: String(id), date }))
+    .sort((a, b) => (a.date < b.date ? -1 : 1));
+}
+
+function deriveMatchTypes(env, rows, gradeCalendar) {
   const twoDay = env.PLAYHQ_TWO_DAY_FORMAT;
   const oneDay = env.PLAYHQ_ONE_DAY_FORMAT;
   if (!twoDay) return;
-  const sorted = [...rows].sort((a, b) => (a.date < b.date ? -1 : 1));
-  for (let i = 0; i < sorted.length; i++) {
-    const g = sorted[i];
-    const next = sorted[i + 1];
-    if (!next || g.round == null || next.round !== g.round + 1) continue;
-    const gap = (Date.parse(next.date) - Date.parse(g.date)) / 86400000;
-    if (gap <= 7) {
-      if (oneDay) g._format = oneDay;
-    } else if (gap === 14) {
-      g._format = twoDay;
-      g.finish_date = addDays(g.date, 7); // day two
+
+  // Fall back to our own fixture's spacing if the grade calendar is missing.
+  const cal = gradeCalendar?.length
+    ? gradeCalendar
+    : [...rows].sort((a, b) => (a.date < b.date ? -1 : 1))
+        .map((r) => ({ id: String(r._roundId), date: r.date }));
+  const posOf = new Map(cal.map((c, i) => [c.id, i]));
+
+  for (const row of rows) {
+    const i = posOf.get(String(row._roundId));
+    if (i == null) continue;
+    const next = cal[i + 1];
+    if (!next) {
+      // Final round of the grade: nothing follows it to measure against, so
+      // this is the one case the calendar can't answer. PLAYHQ_LAST_ROUND_FORMAT
+      // states the club's convention rather than leaving it blank.
+      if (env.PLAYHQ_LAST_ROUND_FORMAT) row._format = env.PLAYHQ_LAST_ROUND_FORMAT;
+      continue;
     }
+    const gap = (Date.parse(next.date) - Date.parse(row.date)) / 86400000;
+    if (gap <= 7) {
+      if (oneDay) row._format = oneDay;
+    } else if (gap >= 14) {
+      // Includes gaps longer than a fortnight: a mid-season break follows the
+      // second day, it doesn't replace it.
+      row._format = twoDay;
+      row.finish_date = addDays(row.date, 7);
+    }
+    // 8-13 days is neither pattern — left unset rather than guessed.
   }
 }
 
 async function collectSeasonFixtures(env, seasonId) {
   const teams = await fetchClubTeams(env, seasonId);
   const clubTeamIds = new Set(teams.map((t) => t.id));
+  const calendars = new Map(); // gradeId -> round calendar, fetched once per grade
   const byId = new Map(); // dedupe: two club teams facing each other share one game
+
   for (const team of teams) {
     const games = await fetchTeamFixture(env, team.id);
     const rows = [];
     for (const game of games) {
       const row = mapGame(game, clubTeamIds, team);
-      if (row) rows.push(row);
+      if (row) {
+        row._roundId = String(game.round?.id || game.round?.name || "");
+        rows.push(row);
+      }
     }
-    // Derived per team: the gap rule only holds within one team's own fixture.
-    deriveMatchTypes(env, rows);
+
+    const gradeId = team.grade?.id;
+    if (gradeId && !calendars.has(gradeId)) {
+      try {
+        calendars.set(gradeId, buildRoundCalendar(await playhqFetchAll(env, `/v1/grades/${gradeId}/games`)));
+      } catch (err) {
+        console.error(`grade calendar ${gradeId} failed`, err);
+        calendars.set(gradeId, null); // derivation falls back to our own spacing
+      }
+    }
+    deriveMatchTypes(env, rows, gradeId ? calendars.get(gradeId) : null);
     for (const row of rows) byId.set(row.play_hq_id, row);
   }
   return [...byId.values()];
@@ -384,6 +428,12 @@ export default {
         const seasonId = url.searchParams.get("season");
         if (!seasonId) return corsJson({ error: "Missing ?season=" }, 400);
         return corsJson({ data: await fetchClubTeams(env, seasonId) });
+      }
+
+      if (url.pathname === "/gradegames") {
+        const g = url.searchParams.get("grade");
+        if (!g) return corsJson({ error: "Missing ?grade=" }, 400);
+        return corsJson({ data: await playhqFetchAll(env, `/v1/grades/${g}/games`) });
       }
 
       if (url.pathname === "/fixture") {
