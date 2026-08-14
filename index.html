@@ -1766,7 +1766,10 @@ const CLUB_CONFIG = {
   // association publishes finals — at which point it has a following round and
   // resolves like any other. Set it to a format name to state a convention
   // instead of waiting.
-  derivedMatchFormats: { oneDay: 'One Day match', twoDay: '2 Day match', lastRound: null },
+  // `t20` is applied to any grade played mostly midweek — a short-format
+  // competition rather than the weekend league. Set to null if the club has no
+  // such competition.
+  derivedMatchFormats: { oneDay: 'One Day match', twoDay: '2 Day match', t20: 'T20 match', lastRound: null },
   // The competition's mid-season shutdown (MM-DD, may wrap the year end). A
   // long gap normally means a two-day round, but not when the notional second
   // weekend lands in here. Set to null for a competition with no shutdown.
@@ -8650,6 +8653,24 @@ function deriveMatchTypes(fixtures, gradeCalendar) {
     : [...fixtures].sort((a, b) => a.date < b.date ? -1 : 1)
         .map(f => ({ id: String(f.roundId), date: f.date }));
   const posOf = new Map(cal.map((c, i) => [c.id, i]));
+
+  // A grade played mostly midweek is a separate short-format competition
+  // (locally, Thursday-evening T20) rather than the weekend league. Decided
+  // across the whole grade rather than per game, which is what makes it robust
+  // both ways: a public-holiday weekday round in a Saturday competition can't
+  // flip the majority, and a midweek competition's Sunday grand final is still
+  // correctly a T20. Must run before the gap rule — a fortnightly T20
+  // competition would otherwise look exactly like two-day cricket.
+  if (cfg.t20 && cal.length) {
+    const midweek = cal.filter(c => {
+      const day = new Date(`${c.date}T00:00:00Z`).getUTCDay();
+      return day >= 1 && day <= 5;
+    }).length;
+    if (midweek * 2 > cal.length) {
+      fixtures.forEach(f => { f.format = cfg.t20; });
+      return;
+    }
+  }
 
   for (const f of fixtures) {
     const i = posOf.get(String(f.roundId));
