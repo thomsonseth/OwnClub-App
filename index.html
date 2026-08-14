@@ -1763,6 +1763,10 @@ const CLUB_CONFIG = {
   // can't decide (nothing follows it to measure against); set it to null to
   // leave that fixture blank instead.
   derivedMatchFormats: { oneDay: 'One Day match', twoDay: '2 Day match', lastRound: 'One Day match' },
+  // The competition's mid-season shutdown (MM-DD, may wrap the year end). A
+  // long gap normally means a two-day round, but not when the notional second
+  // weekend lands in here. Set to null for a competition with no shutdown.
+  competitionBreak: { from: '12-24', to: '01-01' },
   // Only a STARTING list for the manual-match grade dropdown, for a club with
   // no fixtures yet — once fixtures are imported the club's real team names
   // are merged in automatically (see matchGradeOptions()).
@@ -8624,6 +8628,16 @@ function buildRoundCalendar(games) {
     .sort((a, b) => a.date < b.date ? -1 : 1);
 }
 
+// Is this date inside the competition's mid-season shutdown? Configured as
+// MM-DD and allowed to wrap the year end. Null disables it, and every long gap
+// is then read as a two-day round.
+function inCompetitionBreak(isoDate) {
+  const b = CLUB_CONFIG.competitionBreak;
+  if (!b?.from || !b?.to) return false;
+  const md = isoDate.slice(5);
+  return b.from <= b.to ? (md >= b.from && md <= b.to) : (md >= b.from || md <= b.to);
+}
+
 function deriveMatchTypes(fixtures, gradeCalendar) {
   const cfg = CLUB_CONFIG.derivedMatchFormats;
   if (!cfg?.twoDay) return;
@@ -8644,9 +8658,19 @@ function deriveMatchTypes(fixtures, gradeCalendar) {
     const gap = (Date.parse(next.date) - Date.parse(f.date)) / 86400000;
     if (gap <= 7) {
       if (cfg.oneDay) f.format = cfg.oneDay;
-    } else if (gap >= 14) {               // a break follows day two, not replaces it
-      f.format = cfg.twoDay;
-      f.finishDate = addDays(f.date, 7);
+    } else if (gap >= 14) {
+      // A fortnight or more usually means the round spans two weekends —
+      // unless that second weekend falls in the competition's shutdown, in
+      // which case it's a one-day game followed by the break. (Checked against
+      // four DVCA seasons: the Saturday-before-Christmas round is one-day,
+      // while the same 21-day gap in November is a real two-day game.)
+      const dayTwo = addDays(f.date, 7);
+      if (inCompetitionBreak(dayTwo)) {
+        if (cfg.oneDay) f.format = cfg.oneDay;
+      } else {
+        f.format = cfg.twoDay;
+        f.finishDate = dayTwo;
+      }
     }
     // 8-13 days matches neither pattern — left unset rather than guessed.
   }
