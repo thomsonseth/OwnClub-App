@@ -45,9 +45,16 @@ PLAYHQ_CLUB_NAME = "Laurimar"
 # all be labelled two-day. Values should match CLUB_CONFIG.matchFormats.
 PLAYHQ_ONE_DAY_FORMAT = "One Day match"
 PLAYHQ_TWO_DAY_FORMAT = "2 Day match"
-# The final round of a grade has no following round to measure against — the
-# one case the calendar can't decide. This states the club's convention for it.
-# Unset it to leave the last round blank for an admin instead.
+# The competition's mid-season shutdown (MM-DD, may wrap the year end). A long
+# gap normally means a two-day round, but not when the notional second weekend
+# falls in here — that's a one-day game followed by the break. Verified across
+# four DVCA seasons. Leave unset for a competition with no shutdown.
+PLAYHQ_BREAK_FROM = "12-24"
+PLAYHQ_BREAK_TO   = "01-01"
+# A grade's final round has nothing after it to measure against until finals
+# are published (once they are, the calendar resolves it like any other round).
+# In all three completed DVCA seasons the last home-and-away round was one-day
+# with finals the following Saturday, so that's the stated convention.
 PLAYHQ_LAST_ROUND_FORMAT = "One Day match"
 ONESIGNAL_PROXY_URL = "https://onesignal-proxy.thomsonseth.workers.dev"
 APP_URL = "https://laurimar-power.netlify.app"

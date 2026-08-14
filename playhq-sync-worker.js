@@ -214,6 +214,18 @@ function buildRoundCalendar(games) {
     .sort((a, b) => (a.date < b.date ? -1 : 1));
 }
 
+// Is this date inside the competition's mid-season shutdown? Configured as
+// MM-DD via PLAYHQ_BREAK_FROM/TO and allowed to wrap the year end (cricket's
+// Christmas break is 12-24 to 01-01). Unset means no shutdown, and every long
+// gap is then read as a two-day game.
+function inCompetitionBreak(env, isoDate) {
+  const from = env.PLAYHQ_BREAK_FROM;
+  const to = env.PLAYHQ_BREAK_TO;
+  if (!from || !to) return false;
+  const md = isoDate.slice(5);
+  return from <= to ? md >= from && md <= to : md >= from || md <= to;
+}
+
 function deriveMatchTypes(env, rows, gradeCalendar) {
   const twoDay = env.PLAYHQ_TWO_DAY_FORMAT;
   const oneDay = env.PLAYHQ_ONE_DAY_FORMAT;
@@ -241,10 +253,19 @@ function deriveMatchTypes(env, rows, gradeCalendar) {
     if (gap <= 7) {
       if (oneDay) row._format = oneDay;
     } else if (gap >= 14) {
-      // Includes gaps longer than a fortnight: a mid-season break follows the
-      // second day, it doesn't replace it.
-      row._format = twoDay;
-      row.finish_date = addDays(row.date, 7);
+      // A fortnight or more usually means the round spans two weekends — but
+      // not if the second weekend falls in the competition's shutdown. Checked
+      // against four DVCA seasons: rounds played on the Saturday before
+      // Christmas are one-day games followed by the break (their notional day
+      // two would land between Christmas and New Year), while an identical
+      // 21-day gap in November is a genuine two-day game plus a bye week.
+      const dayTwo = addDays(row.date, 7);
+      if (inCompetitionBreak(env, dayTwo)) {
+        if (oneDay) row._format = oneDay;
+      } else {
+        row._format = twoDay;
+        row.finish_date = dayTwo;
+      }
     }
     // 8-13 days is neither pattern — left unset rather than guessed.
   }
