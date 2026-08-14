@@ -1754,9 +1754,12 @@ const CLUB_CONFIG = {
   unofficialMatchFormat: 'Practice match',
   unofficialMatchLabel:  'Unofficial Matches',
   // Formats for official (PlayHQ) fixtures. PlayHQ's public API doesn't
-  // expose the match format, so an admin sets it on the fixture — these are
-  // the choices offered. Change the list for a club playing other formats.
+  // expose the match format, so it's derived on import (see deriveMatchTypes)
+  // and an admin can correct it. Change the list for other formats.
   matchFormats: ['2 Day match', 'One Day match', 'T20 match'],
+  // Names used by the derivation. Set to null for a club whose competition
+  // isn't one/two-day — fortnightly fixtures would otherwise read as two-day.
+  derivedMatchFormats: { oneDay: 'One Day match', twoDay: '2 Day match' },
   // Only a STARTING list for the manual-match grade dropdown, for a club with
   // no fixtures yet — once fixtures are imported the club's real team names
   // are merged in automatically (see matchGradeOptions()).
@@ -1982,18 +1985,6 @@ const sb = {
   async update(table, data, match) {
     const q = Object.entries(match).map(([k,v]) => `${k}=eq.${v}`).join('&');
     const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${q}`, {
-      method: 'PATCH',
-      headers: sb._h(),
-      body: JSON.stringify(data),
-    });
-    return r.json();
-  },
-
-  // PATCH with a raw PostgREST filter — the match-object form of update()
-  // can only express column=eq.value and doesn't URL-encode, so it can't
-  // handle things like `play_hq_id=not.is.null` or a grade containing spaces.
-  async updateWhere(table, data, query) {
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${query}`, {
       method: 'PATCH',
       headers: sb._h(),
       body: JSON.stringify(data),
@@ -3164,7 +3155,6 @@ function blankCreateEventForm() {
     category: 'social', title: '', date: '', time: '', finishTime: '', finishDate: '', location: '',
     description: '', hasCost: false, cost: '', recipients: 'all',
     opponent: '', gender: '', format: '', grade: '', homeAway: 'Home',
-    applyFormatToGrade: false,   // bulk-set match type across a grade's fixtures
     image: null, aiPrompt: '', aiGenerating: false, aiImage: null,
     imageTab: 'upload',
     notifications: { immediate: false, weekly: false, oneWeekBefore: false, oneDayBefore: false },
@@ -3185,8 +3175,6 @@ async function handleCreateEvent() {
   const matchTitle = isMatch
     ? (f.homeAway === 'Away' ? `${f.opponent} vs ${CLUB_CONFIG.clubShortName}` : `${CLUB_CONFIG.clubShortName} vs ${f.opponent}`)
     : f.title;
-
-  let bulkFormatCount = 0;   // fixtures touched by "apply to all <grade>"
 
   if (state.editingEventId) {
     // ── UPDATE existing event ──
@@ -3224,20 +3212,6 @@ async function handleCreateEvent() {
       // Persist to Supabase
       sb.update('events', eventToRow(ev), { id: ev.id });
 
-      // Optionally stamp the same match type across every imported fixture in
-      // this grade — otherwise setting it means editing each fixture in turn.
-      // Scoped to PlayHQ-backed events so unofficial matches keep their own
-      // type. The nightly sync never writes `format`, so this survives.
-      if (isMatch && f.applyFormatToGrade && ev.playHQId && ev.grade) {
-        const grade = ev.grade, format = f.format || null;
-        state.events.forEach(e => {
-          if (e.playHQId && e.grade === grade) { e.format = format; bulkFormatCount++; }
-        });
-        sb.updateWhere('events',
-          { format },
-          `grade=eq.${encodeURIComponent(grade)}&play_hq_id=not.is.null`
-        ).catch(() => showToast('Could not update the whole grade — try again.'));
-      }
       // Send notification if immediate ticked
       if (f.notifications?.immediate) {
         sendPushNotification(
@@ -3250,9 +3224,7 @@ async function handleCreateEvent() {
     const editedId = state.editingEventId;
     state.editingEventId = null;
     state.createEventForm = blankCreateEventForm();
-    showToast(bulkFormatCount > 1
-      ? `Match type set for ${bulkFormatCount} fixtures.`
-      : (isMatch ? 'Match updated!' : 'Event updated!'));
+    showToast(isMatch ? 'Match updated!' : 'Event updated!');
     state.activeEventId = editedId;
     navigate('eventdetail');
     // Edit is only reachable from eventdetail (see openEditEvent), so
@@ -5049,13 +5021,7 @@ function buildCreateEvent() {
       <div style="font-size:11px;color:var(--text-dim);margin-top:4px;">
         PlayHQ's public API doesn't publish the match type, so set it here. It won't be overwritten by the nightly sync.
       </div>
-      ${f.grade ? `
-        <div class="notif-option" style="margin-top:8px;" onclick="toggleApplyFormatToGrade()">
-          <div class="notif-checkbox ${f.applyFormatToGrade?'checked':''}">
-            ${f.applyFormatToGrade ? `<svg viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="3" width="13" height="13"><polyline points="20 6 9 17 4 12"/></svg>` : ''}
-          </div>
-          <span class="notif-label">Apply to all ${f.grade} fixtures</span>
-        </div>` : ''}
+
     </div>` : `
     <div class="input-group">
       <label class="input-label">Match type</label>
@@ -7458,10 +7424,6 @@ window.openScheduleMatch = () => {
   forceBackTarget('events');
 };
 
-window.toggleApplyFormatToGrade = () => {
-  state.createEventForm.applyFormatToGrade = !state.createEventForm.applyFormatToGrade;
-  render();
-};
 
 window.openFollowTeam = () => {
   state.modal = { type: 'followTeam' };
@@ -8634,6 +8596,37 @@ function venueLabel(venue) {
   return `${name} — ${surface}`;
 }
 
+function addDays(isoDate, n) {
+  const d = new Date(`${isoDate}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+// PlayHQ's public API doesn't publish the match type, but it's derivable: a
+// two-day game occupies this Saturday and the next, so the following round
+// can't start for 14 days, while a one-day game is followed a week later.
+// Only trusted when the next round number is consecutive — a skipped round
+// means a bye, which produces the same 14-day gap for another reason. Games
+// that stay ambiguous (a mid-season break, the final round) are left unset
+// for an admin to fill in, rather than guessed at.
+// Mirrors deriveMatchTypes() in playhq-sync-worker.js — keep the two in step.
+function deriveMatchTypes(fixtures) {
+  const cfg = CLUB_CONFIG.derivedMatchFormats;
+  if (!cfg?.twoDay) return;
+  const sorted = [...fixtures].sort((a, b) => a.date < b.date ? -1 : 1);
+  for (let i = 0; i < sorted.length; i++) {
+    const g = sorted[i], next = sorted[i + 1];
+    if (!next || g.round == null || next.round !== g.round + 1) continue;
+    const gap = (Date.parse(next.date) - Date.parse(g.date)) / 86400000;
+    if (gap <= 7) {
+      if (cfg.oneDay) g.format = cfg.oneDay;
+    } else if (gap === 14) {
+      g.format = cfg.twoDay;
+      g.finishDate = addDays(g.date, 7);   // day two
+    }
+  }
+}
+
 // Map a PlayHQ game object to the import screen's fixture shape. Only dated
 // games count — a team is "fixtured" once it has ≥1 scheduled game.
 function mapPHQGame(g, comp) {
@@ -8681,6 +8674,9 @@ window.importLoadAll = async () => {
       for (const team of teams) {
         const games = (await playHQGet(`/fixture?team=${encodeURIComponent(team.id)}`)).data;
         const fixtures = games.map(g => mapPHQGame(g, comp)).filter(f => f.date && !seenGameIds.has(f.id));
+        // Derived per team — the round-spacing rule only holds within a
+        // single team's own fixture.
+        deriveMatchTypes(fixtures);
         fixtures.forEach(f => seenGameIds.add(f.id));
         if (fixtures.length) {
           summary.push({
@@ -8721,13 +8717,17 @@ window.importConfirm = async () => {
       // visible in the description.
       const competitionGrade = fix.gradeName || t.grade || t.comp;
       const gradeName = t.teamLabel || competitionGrade;
+      // Keep an admin's own match type when the derivation can't tell (a
+      // mid-season break, the last round) — re-importing shouldn't wipe it.
+      const existing = state.events.find(e => e.playHQId === fix.id);
       rowsById[fix.id] = {
         play_hq_id: fix.id,
         type: 'match',
         title: `${fix.homeTeam} vs ${fix.awayTeam}`,
         date: fix.date,
         time: fix.time || null,
-        finish_date: fix.date,
+        finish_date: fix.finishDate || fix.date,
+        format: fix.format || existing?.format || null,
         location: fix.venue || null,
         description: `Round ${fix.round || '—'} · ${competitionGrade} · Imported from PlayHQ`,
         cost: 0,
