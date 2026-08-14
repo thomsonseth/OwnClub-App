@@ -238,6 +238,25 @@ function deriveMatchTypes(env, rows, gradeCalendar) {
         .map((r) => ({ id: String(r._roundId), date: r.date }));
   const posOf = new Map(cal.map((c, i) => [c.id, i]));
 
+  // A grade played mostly midweek is a separate short-format competition
+  // (locally, Thursday-evening T20) rather than the weekend league. Decided
+  // across the whole grade, not per game, which is what makes it robust both
+  // ways: a public-holiday weekday round in a Saturday competition doesn't
+  // flip the majority, and a midweek competition's Sunday grand final is
+  // still correctly a T20. This has to run before the gap rule — a T20
+  // competition played fortnightly would otherwise look like two-day cricket.
+  const t20 = env.PLAYHQ_T20_FORMAT;
+  if (t20 && cal.length) {
+    const midweek = cal.filter((c) => {
+      const day = new Date(`${c.date}T00:00:00Z`).getUTCDay();
+      return day >= 1 && day <= 5;
+    }).length;
+    if (midweek * 2 > cal.length) {
+      for (const row of rows) row._format = t20;
+      return;
+    }
+  }
+
   for (const row of rows) {
     const i = posOf.get(String(row._roundId));
     if (i == null) continue;

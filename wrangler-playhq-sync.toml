@@ -45,6 +45,10 @@ PLAYHQ_CLUB_NAME = "Laurimar"
 # all be labelled two-day. Values should match CLUB_CONFIG.matchFormats.
 PLAYHQ_ONE_DAY_FORMAT = "One Day match"
 PLAYHQ_TWO_DAY_FORMAT = "2 Day match"
+# A grade whose rounds are mostly midweek is a short-format competition rather
+# than the weekend league (locally, Thursday-evening T20). Leave unset for a
+# club with no such competition.
+PLAYHQ_T20_FORMAT = "T20 match"
 # The competition's mid-season shutdown (MM-DD, may wrap the year end). A long
 # gap normally means a two-day round, but not when the notional second weekend
 # falls in here — that's a one-day game followed by the break. Verified across
