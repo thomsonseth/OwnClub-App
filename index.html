@@ -1759,7 +1759,10 @@ const CLUB_CONFIG = {
   matchFormats: ['2 Day match', 'One Day match', 'T20 match'],
   // Names used by the derivation. Set to null for a club whose competition
   // isn't one/two-day — fortnightly fixtures would otherwise read as two-day.
-  derivedMatchFormats: { oneDay: 'One Day match', twoDay: '2 Day match' },
+  // `lastRound` covers a grade's final round, the one case the round calendar
+  // can't decide (nothing follows it to measure against); set it to null to
+  // leave that fixture blank instead.
+  derivedMatchFormats: { oneDay: 'One Day match', twoDay: '2 Day match', lastRound: 'One Day match' },
   // Only a STARTING list for the manual-match grade dropdown, for a club with
   // no fixtures yet — once fixtures are imported the club's real team names
   // are merged in automatically (see matchGradeOptions()).
@@ -8602,28 +8605,50 @@ function addDays(isoDate, n) {
   return d.toISOString().slice(0, 10);
 }
 
-// PlayHQ's public API doesn't publish the match type, but it's derivable: a
-// two-day game occupies this Saturday and the next, so the following round
-// can't start for 14 days, while a one-day game is followed a week later.
-// Only trusted when the next round number is consecutive — a skipped round
-// means a bye, which produces the same 14-day gap for another reason. Games
-// that stay ambiguous (a mid-season break, the final round) are left unset
-// for an admin to fill in, rather than guessed at.
+// PlayHQ's public API doesn't publish the match type, but the GRADE's round
+// calendar determines it: a two-day game occupies its date and the following
+// week, so the grade's next round can't begin for a fortnight, whereas a
+// one-day round is followed a week later. Read from the whole grade rather
+// than our own fixture, so a bye on our side can't shift the spacing.
 // Mirrors deriveMatchTypes() in playhq-sync-worker.js — keep the two in step.
-function deriveMatchTypes(fixtures) {
+function buildRoundCalendar(games) {
+  const earliest = new Map();   // round -> first date that round is played
+  for (const g of games) {
+    const date = g.schedule?.date;
+    const key = g.round?.id || g.round?.name;
+    if (!date || !key) continue;
+    if (!earliest.has(key) || date < earliest.get(key)) earliest.set(key, date);
+  }
+  return [...earliest.entries()]
+    .map(([id, date]) => ({ id: String(id), date }))
+    .sort((a, b) => a.date < b.date ? -1 : 1);
+}
+
+function deriveMatchTypes(fixtures, gradeCalendar) {
   const cfg = CLUB_CONFIG.derivedMatchFormats;
   if (!cfg?.twoDay) return;
-  const sorted = [...fixtures].sort((a, b) => a.date < b.date ? -1 : 1);
-  for (let i = 0; i < sorted.length; i++) {
-    const g = sorted[i], next = sorted[i + 1];
-    if (!next || g.round == null || next.round !== g.round + 1) continue;
-    const gap = (Date.parse(next.date) - Date.parse(g.date)) / 86400000;
-    if (gap <= 7) {
-      if (cfg.oneDay) g.format = cfg.oneDay;
-    } else if (gap === 14) {
-      g.format = cfg.twoDay;
-      g.finishDate = addDays(g.date, 7);   // day two
+  const cal = gradeCalendar?.length
+    ? gradeCalendar
+    : [...fixtures].sort((a, b) => a.date < b.date ? -1 : 1)
+        .map(f => ({ id: String(f.roundId), date: f.date }));
+  const posOf = new Map(cal.map((c, i) => [c.id, i]));
+
+  for (const f of fixtures) {
+    const i = posOf.get(String(f.roundId));
+    if (i == null) continue;
+    const next = cal[i + 1];
+    if (!next) {                          // grade's final round
+      if (cfg.lastRound) f.format = cfg.lastRound;
+      continue;
     }
+    const gap = (Date.parse(next.date) - Date.parse(f.date)) / 86400000;
+    if (gap <= 7) {
+      if (cfg.oneDay) f.format = cfg.oneDay;
+    } else if (gap >= 14) {               // a break follows day two, not replaces it
+      f.format = cfg.twoDay;
+      f.finishDate = addDays(f.date, 7);
+    }
+    // 8-13 days matches neither pattern — left unset rather than guessed.
   }
 }
 
@@ -8636,6 +8661,7 @@ function mapPHQGame(g, comp) {
   const roundMatch = String(g.round?.name || g.round?.abbreviatedName || '').match(/\d+/);
   return {
     id: g.id,
+    roundId: String(g.round?.id || g.round?.name || ''),
     round: roundMatch ? Number(roundMatch[0]) : null,
     homeTeam: homeComp?.name || 'TBC',
     homeTeamId: homeComp?.id || null,
@@ -8666,6 +8692,7 @@ window.importLoadAll = async () => {
 
     const summary = [];
     const seenGameIds = new Set();  // a club derby appears in both teams' fixtures
+    const gradeCalendars = new Map();  // gradeId -> round calendar, fetched once
     for (const seasonId of seasonIds) {
       const season = s.seasons.find(x => x.id === seasonId);
       const comp = season?.competition?.name || season?.association?.name || '';
@@ -8674,9 +8701,19 @@ window.importLoadAll = async () => {
       for (const team of teams) {
         const games = (await playHQGet(`/fixture?team=${encodeURIComponent(team.id)}`)).data;
         const fixtures = games.map(g => mapPHQGame(g, comp)).filter(f => f.date && !seenGameIds.has(f.id));
-        // Derived per team — the round-spacing rule only holds within a
-        // single team's own fixture.
-        deriveMatchTypes(fixtures);
+        // Match type comes from the grade's own round calendar, fetched once
+        // per grade. Without it the derivation falls back to our fixture's
+        // spacing, which a bye could distort.
+        const gradeId = team.grade?.id;
+        if (gradeId && !gradeCalendars.has(gradeId)) {
+          try {
+            const gg = (await playHQGet(`/gradegames?grade=${encodeURIComponent(gradeId)}`)).data;
+            gradeCalendars.set(gradeId, buildRoundCalendar(gg));
+          } catch (e) {
+            gradeCalendars.set(gradeId, null);
+          }
+        }
+        deriveMatchTypes(fixtures, gradeId ? gradeCalendars.get(gradeId) : null);
         fixtures.forEach(f => seenGameIds.add(f.id));
         if (fixtures.length) {
           summary.push({
