@@ -1770,6 +1770,10 @@ const CLUB_CONFIG = {
   // competition rather than the weekend league. Set to null if the club has no
   // such competition.
   derivedMatchFormats: { oneDay: 'One Day match', twoDay: '2 Day match', t20: 'T20 match', lastRound: null },
+  // Match types shown on everyone's Home regardless of the team they follow —
+  // midweek T20 is a whole-club occasion (men's and women's), and the point is
+  // for members to know it's on and turn up.
+  clubWideMatchFormats: ['T20 match'],
   // The competition's mid-season shutdown (MM-DD, may wrap the year end). A
   // long gap normally means a two-day round, but not when the notional second
   // weekend lands in here. Set to null for a competition with no shutdown.
@@ -2981,10 +2985,18 @@ function forceBackTarget(screen) {
 // filtered to the followed team, so recomputing it differently here would let
 // the index run past the end of the visible list.
 function homeSliderItems(prefix) {
-  return state.events
-    .filter(e => prefix === 'match'
-      ? (e.type === 'match' && isUpcoming(e.date) && isFollowedMatch(e))
-      : (e.type === 'social' && isUpcoming(e.date)))
+  if (prefix !== 'match') {
+    return state.events
+      .filter(e => e.type === 'social' && isUpcoming(e.date))
+      .sort((a,b) => a.date > b.date ? 1 : -1);
+  }
+  const upcoming = state.events.filter(e => e.type === 'match' && isUpcoming(e.date));
+  const uid = state.user?.id;
+  // A match you've been picked for outranks anything else that day — you need
+  // to see the game you're playing in, not the one you happen to follow.
+  const playingDates = new Set(upcoming.filter(e => isSelectedInMatch(e, uid)).map(e => e.date));
+  return upcoming
+    .filter(e => isSelectedInMatch(e, uid) || (!playingDates.has(e.date) && isFollowedMatch(e)))
     .sort((a,b) => a.date > b.date ? 1 : -1);
 }
 
@@ -4461,6 +4473,11 @@ function buildEvents() {
         if (!gradeMap[key]) gradeMap[key] = [];
         gradeMap[key].push(ev);
       });
+      // Admins always see the unofficial section, even when empty — it's where
+      // "Schedule match" now lives, and the button can't be allowed to vanish
+      // just because nothing has been scheduled yet.
+      const unofficialKey = CLUB_CONFIG.unofficialMatchLabel;
+      if (isAdmin && filter === 'upcoming' && !gradeMap[unofficialKey]) gradeMap[unofficialKey] = [];
 
       // null means all expanded — initialise with all keys open on first render
       if (state.expandedGrades === null) {
@@ -4479,6 +4496,15 @@ function buildEvents() {
         }
         const isOpen = state.expandedGrades.has(gradeName);
         const count = evs.length;
+        // Official fixtures all arrive from PlayHQ, so scheduling only ever
+        // means adding an unofficial match — the button belongs in that
+        // section rather than competing with Import fixture at the top.
+        const isUnofficial = gradeName === CLUB_CONFIG.unofficialMatchLabel;
+        const scheduleBtn = (isAdmin && isUnofficial && filter === 'upcoming') ? `
+          <button class="btn-secondary" style="margin-top:8px;display:flex;align-items:center;justify-content:center;gap:8px;"
+            onclick="event.stopPropagation();openScheduleMatch()">
+            <span>${icons.plus}</span> Schedule match
+          </button>` : '';
         return `
           <div style="margin-bottom:10px;">
             <div class="grade-accordion-header" onclick="toggleGradeAccordion('${gradeName.replace(/'/g,"\\'")}')">
@@ -4488,7 +4514,7 @@ function buildEvents() {
               </div>
               <span class="grade-accordion-chevron ${isOpen ? 'open' : ''}">›</span>
             </div>
-            ${isOpen ? `<div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">${evs.map(ev => buildEventCard(ev, isAdmin)).join('')}</div>` : ''}
+            ${isOpen ? `<div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">${evs.map(ev => buildEventCard(ev, isAdmin)).join('')}${scheduleBtn}</div>` : ''}
           </div>`;
       }).join('');
 
@@ -4518,15 +4544,10 @@ function buildEvents() {
               <span>${icons.cricketBat}</span> Manage training schedule
              </button>`
           : tab === 'matches'
-          ? `<div style="display:flex;gap:8px;">
-              <button class="btn-primary" style="flex:1;display:flex;align-items:center;justify-content:center;gap:8px;" onclick="navigate('importfixture')">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-                Import fixture
-               </button>
-              <button class="btn-primary" style="flex:1;display:flex;align-items:center;justify-content:center;gap:8px;" onclick="openScheduleMatch()">
-                <span>${icons.plus}</span> Schedule match
-               </button>
-             </div>`
+          ? `<button class="btn-primary" style="display:flex;align-items:center;justify-content:center;gap:8px;" onclick="navigate('importfixture')">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              Import fixture
+             </button>`
           : `<button class="btn-primary" style="display:flex;align-items:center;justify-content:center;gap:8px;" onclick="openCreateEvent()">
               <span>${icons.plus}</span> Create event
              </button>`)
@@ -4991,8 +5012,22 @@ function followedTeamOrDefault() {
 
 // Home shows the followed team's fixtures plus every unofficial match, which
 // are club-wide social/practice occasions rather than one grade's business.
+// Midweek T20 and the like are club-wide occasions — men's and women's alike —
+// so they reach everyone's Home regardless of the team they follow.
+function isClubWideMatch(ev) {
+  return !!ev.format && (CLUB_CONFIG.clubWideMatchFormats || []).includes(ev.format);
+}
+
+// Is this member named in the selected team for this match? Guests carry a
+// synthetic id and never match a real user.
+function isSelectedInMatch(ev, userId) {
+  if (!userId || !Array.isArray(ev.team)) return false;
+  return ev.team.some(p => p && !p.isGuest && p.id === userId);
+}
+
 function isFollowedMatch(ev) {
-  if (!ev.playHQId) return true;
+  if (!ev.playHQId) return true;        // manually scheduled — club-wide
+  if (isClubWideMatch(ev)) return true; // midweek T20 — club-wide
   const followed = followedTeamOrDefault();
   return !followed || ev.grade === followed;
 }
