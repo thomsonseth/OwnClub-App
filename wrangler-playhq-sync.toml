@@ -52,9 +52,11 @@ PLAYHQ_TWO_DAY_FORMAT = "2 Day match"
 PLAYHQ_BREAK_FROM = "12-24"
 PLAYHQ_BREAK_TO   = "01-01"
 # A grade's final round has nothing after it to measure against until finals
-# are published (once they are, the calendar resolves it like any other round).
-# In all three completed DVCA seasons the last home-and-away round was one-day
-# with finals the following Saturday, so that's the stated convention.
-PLAYHQ_LAST_ROUND_FORMAT = "One Day match"
+# are published. Finals DO appear in the fixture (round.isFinalRound), so once
+# the association loads them the normal rule resolves that round and the sync
+# backfills it. Left unset deliberately: an uncategorised fixture is honest,
+# a guessed one isn't. Set it to a format name to state a club convention
+# instead of waiting.
+# PLAYHQ_LAST_ROUND_FORMAT = "One Day match"
 ONESIGNAL_PROXY_URL = "https://onesignal-proxy.thomsonseth.workers.dev"
 APP_URL = "https://laurimar-power.netlify.app"

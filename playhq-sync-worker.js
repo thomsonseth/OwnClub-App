@@ -342,9 +342,12 @@ async function supabaseGet(env, pathAndQuery) {
   return res.json();
 }
 
-async function fetchImportedPlayhqIds(env) {
-  const rows = await supabaseGet(env, "events?select=play_hq_id&play_hq_id=not.is.null");
-  return new Set(rows.map((r) => r.play_hq_id));
+// play_hq_id -> the match type currently stored (null when not yet known).
+// The value matters: it's what lets the sync fill in a blank without ever
+// overwriting one an admin has set.
+async function fetchImportedFormats(env) {
+  const rows = await supabaseGet(env, "events?select=play_hq_id,format&play_hq_id=not.is.null");
+  return new Map(rows.map((r) => [r.play_hq_id, r.format ?? null]));
 }
 
 // Push a notification to club Administrators via the existing onesignal-proxy
@@ -376,8 +379,8 @@ async function notifyAdmins(env, title, message) {
 // refresh rows deliberately omit description/cost so admin edits to those
 // fields survive.
 async function runSync(env) {
-  const imported = await fetchImportedPlayhqIds(env);
-  if (imported.size === 0) return { synced: 0, added: 0, fixtures: [] }; // not activated yet
+  const imported = await fetchImportedFormats(env);
+  if (imported.size === 0) return { synced: 0, added: 0, backfilled: 0, fixtures: [] }; // not activated yet
 
   let seasonIds = [];
   if (env.PLAYHQ_ORG_ID) {
@@ -402,13 +405,25 @@ async function runSync(env) {
       // present so the batch has uniform columns.
       format: r._format ?? null,
     }));
-  // Updates deliberately carry no `format` column, so an admin's own match
-  // type survives every future sync.
-  const updateRows = fixtures.filter((r) => imported.has(r.play_hq_id));
+  const existing = fixtures.filter((r) => imported.has(r.play_hq_id));
 
-  // Two upserts: PostgREST bulk requests need uniform columns per batch.
+  // A fixture whose type couldn't be worked out at import — a grade's final
+  // round, before finals were published — becomes derivable once the calendar
+  // extends past it. Fill those in, and only those: a row that already has a
+  // type keeps it, so an admin's correction is never overwritten.
+  const backfillRows = existing
+    .filter((r) => r._format && imported.get(r.play_hq_id) == null)
+    .map((r) => ({ ...r, format: r._format }));
+  const backfillIds = new Set(backfillRows.map((r) => r.play_hq_id));
+
+  // Everything else updates without a `format` column at all, so the stored
+  // value is untouchable by sync.
+  const updateRows = existing.filter((r) => !backfillIds.has(r.play_hq_id));
+
+  // Separate upserts: PostgREST bulk requests need uniform columns per batch.
   await upsertEvents(env, newRows);
   await upsertEvents(env, updateRows);
+  await upsertEvents(env, backfillRows);
 
   if (newRows.length > 0) {
     const grades = [...new Set(newRows.map((r) => r.grade).filter(Boolean))];
@@ -419,7 +434,7 @@ async function runSync(env) {
     ).catch((err) => console.error("notifyAdmins failed", err));
   }
 
-  return { synced: fixtures.length, added: newRows.length, fixtures };
+  return { synced: fixtures.length, added: newRows.length, backfilled: backfillRows.length, fixtures };
 }
 
 export default {
@@ -475,8 +490,8 @@ export default {
 
       if (url.pathname === "/sync") {
         if (!secretMatches(secret, env.ADMIN_SECRET)) return new Response("Unauthorized", { status: 401 });
-        const { synced, added } = await runSync(env);
-        return Response.json({ synced, added });
+        const { synced, added, backfilled } = await runSync(env);
+        return Response.json({ synced, added, backfilled });
       }
     } catch (err) {
       return corsJson({ error: err.message }, 500);
@@ -488,7 +503,8 @@ export default {
   async scheduled(_event, env, ctx) {
     ctx.waitUntil(
       runSync(env)
-        .then(({ synced, added }) => console.log(`playhq-sync cron: synced ${synced} fixtures (${added} new)`))
+        .then(({ synced, added, backfilled }) =>
+          console.log(`playhq-sync cron: synced ${synced} fixtures (${added} new, ${backfilled} match types filled in)`))
         .catch((err) => console.error("playhq-sync cron failed", err))
     );
   },
