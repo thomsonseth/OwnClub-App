@@ -1914,14 +1914,15 @@ const state = {
     title: '',
     body: '',
     image: null,
-    audienceGroups: ['all'],
+    audienceGroups: [],
     audienceUsers: [],
-    audienceExpanded: false,
+    audienceSpecific: false,
+    audienceSearch: '',
     sendNotification: true,
   },
   createEventForm: {
     category: 'social', title: '', date: '', time: '', finishTime: '', finishDate: '', location: '',
-    description: '', hasCost: false, cost: '', audienceGroups: ['all'], audienceUsers: [], audienceExpanded: false,
+    description: '', hasCost: false, cost: '', audienceGroups: [], audienceUsers: [], audienceSpecific: false, audienceSearch: '',
     opponent: '', gender: '', format: '', grade: '', homeAway: 'Home', // match-specific fields
     image: null,           // base64 uploaded image
     aiPrompt: '',          // AI image prompt
@@ -2215,15 +2216,23 @@ function audienceSummary(groups, users) {
   return names.length ? names.join(', ') : 'Nobody yet — pick at least one';
 }
 
-// Shared by the announcement and event forms. Handler names are passed as
-// strings because these render into onclick attributes.
-function buildAudiencePicker(groups, users, toggleGroupFn, toggleUserFn, expandFn, expanded) {
+// Which form a namespaced audience handler is acting on. 'Ann' = announcement,
+// 'CE' = create event. Passing a namespace rather than six handler names keeps
+// the call sites to one argument each.
+function audienceForm(ns) {
+  return ns === 'Ann' ? state.createAnnouncementForm : state.createEventForm;
+}
+
+// Shared by the announcement and event forms.
+function buildAudiencePicker(f, ns) {
   // Empty means "nothing chosen yet" and must render as such. Coercing it to
   // ['all'] here is what made unticking Everyone appear to do nothing: state
   // cleared correctly, then the picker drew it as ticked again.
-  const g = Array.isArray(groups) ? groups : ['all'];
+  const g = Array.isArray(f.audienceGroups) ? f.audienceGroups : [];
   const all = g.includes('all');
-  const chosen = users || [];
+  const chosen = f.audienceUsers || [];
+  const specific = !!f.audienceSpecific;
+
   const box = (on, label, note, onclick) => `
     <div class="notif-option" onclick="${onclick}">
       <div class="notif-checkbox ${on ? 'checked' : ''}">
@@ -2232,21 +2241,38 @@ function buildAudiencePicker(groups, users, toggleGroupFn, toggleUserFn, expandF
       <div><div class="notif-label">${label}</div>${note ? `<div style="font-size:12px;color:var(--text-muted);margin-top:2px;">${note}</div>` : ''}</div>
     </div>`;
 
-  // Categories first, then "Everyone" as the catch-all beneath them, then
-  // individuals. Ticking "Everyone" collapses everything above and below it,
-  // since those choices no longer mean anything — but it stays on screen so
-  // it can always be unticked again.
-  return `
-    ${all ? '' : AUDIENCE_GROUPS.map(x => box(g.includes(x.key), x.label, '', `${toggleGroupFn}('${x.key}')`)).join('')}
-    ${box(all, 'Everyone in the club', all ? 'Untick to choose specific groups' : '', `${toggleGroupFn}('all')`)}
-    ${all ? '' : `
-      <div style="font-size:13px;font-weight:600;color:var(--text-muted);margin:10px 0 4px;cursor:pointer;" onclick="${expandFn}()">
-        ${expanded ? '▾' : '▸'} Also send to specific people${chosen.length ? ` (${chosen.length})` : ''}
+  // Categories, then "Everyone" as the catch-all beneath them, then "Specific
+  // users". Ticking Everyone collapses everything else — those choices stop
+  // meaning anything — but Everyone itself stays on screen so it can always
+  // be unticked again.
+  const chosenList = chosen.map(id => {
+    const u = state.users.find(x => x.id === id);
+    if (!u) return '';
+    return `<div style="display:flex;align-items:center;gap:8px;padding:7px 10px;background:var(--surface2);border-radius:8px;">
+      <div style="flex:1;">
+        <div style="font-size:14px;color:var(--text);">${u.firstName} ${u.lastName}</div>
+        <div style="font-size:11px;color:var(--text-muted);">${roleLabel(u)}</div>
       </div>
-      ${expanded ? `<div style="margin-left:8px;border-left:2px solid var(--border);padding-left:10px;">
-        ${state.users.filter(u => u.onboardingComplete)
-          .map(u => box(chosen.includes(u.id), `${u.firstName} ${u.lastName}`, roleLabel(u), `${toggleUserFn}('${u.id}')`))
-          .join('')}
+      <button onclick="removeAudienceUser('${ns}','${u.id}')" style="background:none;border:none;color:var(--red);font-size:17px;line-height:1;cursor:pointer;padding:0 2px;" title="Remove">✕</button>
+    </div>`;
+  }).join('');
+
+  return `
+    ${all ? '' : AUDIENCE_GROUPS.map(x => box(g.includes(x.key), x.label, '', `toggleAudienceGroupFor('${ns}','${x.key}')`)).join('')}
+    ${box(all, 'Everyone in the club', all ? 'Untick to choose specific groups' : '', `toggleAudienceGroupFor('${ns}','all')`)}
+    ${all ? '' : `
+      ${box(specific, 'Specific users', '', `toggleAudienceSpecific('${ns}')`)}
+      ${specific ? `
+      <div style="margin-left:8px;border-left:2px solid var(--border);padding-left:10px;display:flex;flex-direction:column;gap:8px;">
+        <div style="position:relative;">
+          <input class="input-field" id="aud-search-${ns}" autocomplete="off" placeholder="Type a name…"
+                 value="${f.audienceSearch || ''}"
+                 oninput="audienceSearchInput('${ns}', this.value)"
+                 onfocus="audienceSearchInput('${ns}', this.value)"
+                 onblur="hideAudienceSuggest('${ns}')"/>
+          <div id="aud-suggest-${ns}" style="display:none;position:absolute;top:100%;left:0;right:0;z-index:20;background:var(--surface2);border:1px solid var(--border);border-radius:10px;margin-top:4px;max-height:190px;overflow-y:auto;"></div>
+        </div>
+        ${chosenList || `<div style="font-size:12px;color:var(--text-muted);">Nobody added yet.</div>`}
       </div>` : ''}`}
     <div style="font-size:12px;color:var(--text-muted);margin-top:8px;">
       Goes to: <span style="color:var(--accent);font-weight:600;">${audienceSummary(g, chosen)}</span>
@@ -3452,7 +3478,7 @@ function handleRSVP(eventId, status, currentStatus) {
 function blankCreateEventForm() {
   return {
     category: 'social', title: '', date: '', time: '', finishTime: '', finishDate: '', location: '',
-    description: '', hasCost: false, cost: '', audienceGroups: ['all'], audienceUsers: [], audienceExpanded: false,
+    description: '', hasCost: false, cost: '', audienceGroups: [], audienceUsers: [], audienceSpecific: false, audienceSearch: '',
     opponent: '', gender: '', format: '', grade: '', homeAway: 'Home',
     image: null, aiPrompt: '', aiGenerating: false, aiImage: null,
     imageTab: 'upload',
@@ -4676,8 +4702,7 @@ function buildCreateAnnouncement() {
 
         <div class="input-group">
           <label class="input-label">Send to</label>
-          ${buildAudiencePicker(f.audienceGroups, f.audienceUsers,
-            'toggleAnnAudienceGroup', 'toggleAnnAudienceUser', 'toggleAnnAudienceExpand', f.audienceExpanded)}
+          ${buildAudiencePicker(f, 'Ann')}
         </div>
 
         <div class="notif-option" onclick="toggleAnnNotification()">
@@ -5563,8 +5588,7 @@ function buildCreateEvent() {
         ${isMatch ? '' : `
         <div class="input-group">
           <label class="input-label">Recipients</label>
-          ${buildAudiencePicker(f.audienceGroups, f.audienceUsers,
-            'toggleCEAudienceGroup', 'toggleCEAudienceUser', 'toggleCEAudienceExpand', f.audienceExpanded)}
+          ${buildAudiencePicker(f, 'CE')}
         </div>`}
 
         ${isMatch ? '' : notifSection}
@@ -7504,41 +7528,64 @@ window.skipPhotoAndJoin = () => {
 
 window.setJoinRole = (role) => { state.joinForm.role = role; render(); };
 
-// Audience pickers — announcement form and event form keep separate state,
-// but share the toggle semantics.
-window.toggleAnnAudienceGroup = (key) => {
-  const f = state.createAnnouncementForm;
+// Audience pickers — the announcement and event forms keep separate state but
+// share every behaviour, so the handlers take a namespace ('Ann' | 'CE').
+window.toggleAudienceGroupFor = (ns, key) => {
+  const f = audienceForm(ns);
   f.audienceGroups = toggleAudienceGroup(f.audienceGroups, key);
-  if (f.audienceGroups.includes('all')) f.audienceUsers = [];
-  render(true);
-};
-window.toggleAnnAudienceUser = (id) => {
-  const f = state.createAnnouncementForm;
-  const list = f.audienceUsers || [];
-  f.audienceUsers = list.includes(id) ? list.filter(x => x !== id) : [...list, id];
-  render(true);
-};
-window.toggleAnnAudienceExpand = () => {
-  const f = state.createAnnouncementForm;
-  f.audienceExpanded = !f.audienceExpanded;
+  // "Everyone" supersedes individuals as well as groups.
+  if (f.audienceGroups.includes('all')) { f.audienceUsers = []; f.audienceSpecific = false; f.audienceSearch = ''; }
   render(true);
 };
 
-window.toggleCEAudienceGroup = (key) => {
-  const f = state.createEventForm;
-  f.audienceGroups = toggleAudienceGroup(f.audienceGroups, key);
-  if (f.audienceGroups.includes('all')) f.audienceUsers = [];
+window.toggleAudienceSpecific = (ns) => {
+  const f = audienceForm(ns);
+  f.audienceSpecific = !f.audienceSpecific;
+  // Unticking discards the list rather than keeping it invisibly attached.
+  if (!f.audienceSpecific) { f.audienceUsers = []; f.audienceSearch = ''; }
   render(true);
 };
-window.toggleCEAudienceUser = (id) => {
-  const f = state.createEventForm;
+
+// Suggestions are written straight into the dropdown rather than going
+// through render(), which would rebuild the input and drop focus mid-word.
+// Same reason teamSlotInput() does it this way.
+window.audienceSearchInput = (ns, val) => {
+  const f = audienceForm(ns);
+  f.audienceSearch = val;
+  const box = document.getElementById(`aud-suggest-${ns}`);
+  if (!box) return;
+  const q = (val || '').trim().toLowerCase();
+  const chosen = f.audienceUsers || [];
+  const matches = state.users.filter(u =>
+    u.onboardingComplete && !chosen.includes(u.id) &&
+    (!q || `${u.firstName} ${u.lastName}`.toLowerCase().includes(q)));
+  if (!matches.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  // onmousedown, not onclick — the input's blur would tear this list down
+  // before a click ever landed.
+  box.innerHTML = matches.map(u => `
+    <div onmousedown="addAudienceUser('${ns}','${u.id}')" style="padding:9px 12px;cursor:pointer;border-bottom:1px solid var(--border);">
+      <div style="font-size:14px;color:var(--text);">${u.firstName} ${u.lastName}</div>
+      <div style="font-size:11px;color:var(--text-muted);">${roleLabel(u)}</div>
+    </div>`).join('');
+  box.style.display = 'block';
+};
+
+window.hideAudienceSuggest = (ns) => {
+  const box = document.getElementById(`aud-suggest-${ns}`);
+  if (box) { box.style.display = 'none'; box.innerHTML = ''; }
+};
+
+window.addAudienceUser = (ns, id) => {
+  const f = audienceForm(ns);
   const list = f.audienceUsers || [];
-  f.audienceUsers = list.includes(id) ? list.filter(x => x !== id) : [...list, id];
+  if (!list.includes(id)) f.audienceUsers = [...list, id];
+  f.audienceSearch = '';   // cleared so the next name starts fresh
   render(true);
 };
-window.toggleCEAudienceExpand = () => {
-  const f = state.createEventForm;
-  f.audienceExpanded = !f.audienceExpanded;
+
+window.removeAudienceUser = (ns, id) => {
+  const f = audienceForm(ns);
+  f.audienceUsers = (f.audienceUsers || []).filter(x => x !== id);
   render(true);
 };
 
@@ -7888,7 +7935,8 @@ window.openEditEvent = (id) => {
     cost:        ev.cost > 0 ? String(ev.cost) : '',
     audienceGroups: ev.audienceGroups || ['all'],
     audienceUsers:  ev.audienceUsers  || [],
-    audienceExpanded: false,
+    audienceSpecific: (ev.audienceUsers || []).length > 0,
+    audienceSearch: '',
     // Match-specific fields, preserved so editing a match (via the generic
     // Edit Event screen) doesn't clobber them on save.
     opponent:    ev.type === 'match' ? (ev.homeAway === 'Away' ? ev.homeTeam : ev.awayTeam) || '' : '',
@@ -8500,7 +8548,7 @@ window.openAnnouncement = (id) => {
 
 window.openCreateAnnouncement = () => {
   state.editingAnnouncementId = null;
-  state.createAnnouncementForm = { title: '', body: '', image: null, audienceGroups: ['all'], audienceUsers: [], audienceExpanded: false, sendNotification: true };
+  state.createAnnouncementForm = { title: '', body: '', image: null, audienceGroups: [], audienceUsers: [], audienceSpecific: false, audienceSearch: '', sendNotification: true };
   state.error = '';
   navigate('createannouncement');
 };
@@ -8517,7 +8565,8 @@ window.editAnnouncement = (id) => {
     // widening it back to the whole club.
     audienceGroups: a.audienceGroups || ['all'],
     audienceUsers: a.audienceUsers || [],
-    audienceExpanded: false,
+    audienceSpecific: (a.audienceUsers || []).length > 0,
+    audienceSearch: '',
     sendNotification: false,
   };
   navigate('createannouncement');
@@ -8562,7 +8611,7 @@ window.publishAnnouncement = async () => {
 
   const u = state.user;
   const reset = () => {
-    state.createAnnouncementForm = { title: '', body: '', image: null, audienceGroups: ['all'], audienceUsers: [], audienceExpanded: false, sendNotification: true };
+    state.createAnnouncementForm = { title: '', body: '', image: null, audienceGroups: [], audienceUsers: [], audienceSpecific: false, audienceSearch: '', sendNotification: true };
     state.editingAnnouncementId = null;
     state.error = '';
   };
