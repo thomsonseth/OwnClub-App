@@ -2150,6 +2150,29 @@ function canManageCricket(u = state.user) {
   return isAppAdmin(u) || (u?.memberRoles || []).some(r => r === 'coach' || r === 'captain');
 }
 
+// Positional roles a member can hold on top of playing status. Order is the
+// order they render in. Playing status is not in here — it's a yes/no, and
+// putting it in the same tick-list makes "neither" reachable, which would
+// silently drop someone out of every audience.
+const POSITIONAL_ROLES = [
+  { key: 'coach',     label: 'Coach',     note: 'Can pick teams and run training' },
+  { key: 'captain',   label: 'Captain',   note: 'Can pick teams and run training' },
+  { key: 'committee', label: 'Committee', note: 'Receives committee notices' },
+];
+const ROLE_LABELS = { player: 'Player', supporter: 'Supporter', coach: 'Coach', captain: 'Captain', committee: 'Committee' };
+
+// Human-readable summary of what someone is, for badges and list rows.
+// Falls back to the legacy `role` string only if the tags are somehow empty.
+function roleLabel(u) {
+  const parts = (u?.memberRoles || []).map(r => ROLE_LABELS[r] || r);
+  if (isAppAdmin(u)) parts.unshift('App Admin');
+  return parts.length ? parts.join(' · ') : (u?.role || '—');
+}
+
+function hasPendingRoles(u) {
+  return Array.isArray(u?.pendingRoles) && u.pendingRoles.length > 0;
+}
+
 // ── Map Supabase event row → app event object ─────────────────────────────
 function rowToEvent(r) {
   return {
@@ -4293,7 +4316,7 @@ function buildHome() {
       <div class="home-content">
         <div class="welcome-section">
           <div class="welcome-name">Welcome back, ${displayName}!</div>
-          <div class="welcome-role">${u.role}</div>
+          <div class="welcome-role">${roleLabel(u)}</div>
         </div>
         <div>
           <div class="section-header" style="margin-bottom:0;">
@@ -6012,7 +6035,7 @@ function buildChatInfo() {
       ${avatarHtml}
       <div style="flex:1;min-width:0;">
         <div style="font-size:15px;font-weight:600;color:var(--text);">${u.firstName} ${u.lastName}${u.nickname ? ` (${u.nickname})` : ''}</div>
-        <div style="font-size:12px;color:var(--text-muted);">${u.role}${isMe ? ' · You' : ''}</div>
+        <div style="font-size:12px;color:var(--text-muted);">${roleLabel(u)}${isMe ? ' · You' : ''}</div>
       </div>
       ${isGroup && !isMe ? `<button class="member-remove-btn" onclick="removeMemberFromGroup('${u.id}')" title="Remove">✕</button>` : ''}
     </div>`;
@@ -6070,7 +6093,7 @@ function buildChatInfo() {
                     : `<div style="width:40px;height:40px;border-radius:50%;background:var(--surface2);display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;color:var(--accent);flex-shrink:0;">${getInitials(u.firstName, u.lastName)}</div>`}
                   <div style="flex:1;">
                     <div style="font-size:15px;font-weight:600;color:var(--text);">${u.firstName} ${u.lastName}</div>
-                    <div style="font-size:12px;color:var(--text-muted);">${u.role}</div>
+                    <div style="font-size:12px;color:var(--text-muted);">${roleLabel(u)}</div>
                   </div>
                   <div style="color:var(--accent);font-size:13px;font-weight:700;">+ Add</div>
                 </div>`).join('')}
@@ -6106,7 +6129,7 @@ function buildNewConversation() {
       ${avatarHtml}
       <div style="flex:1;min-width:0;">
         <div class="contact-pick-name">${u.firstName} ${u.lastName}${u.nickname ? ` (${u.nickname})` : ''}</div>
-        <div class="contact-pick-role">${u.role}</div>
+        <div class="contact-pick-role">${roleLabel(u)}</div>
       </div>
       ${isSel ? `<div style="width:22px;height:22px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;flex-shrink:0;">
         <svg viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="3" width="13" height="13"><polyline points="20 6 9 17 4 12"/></svg>
@@ -6214,7 +6237,7 @@ function buildProfile() {
               <input type="file" id="avatar-upload" accept="image/*" style="display:none;" onchange="handleAvatarUpload(event)"/>
             </label>
           </div>
-          <div class="role-badge">${u.role}</div>
+          <div class="role-badge">${roleLabel(u)}</div>
         </div>
 
         <!-- Fields — read-only until 'Edit Details' is tapped, to avoid accidental edits -->
@@ -6382,7 +6405,7 @@ function buildUserList() {
       ${avatarHtml}
       <div style="flex:1">
         <div class="user-name">${u.firstName} ${u.lastName}</div>
-        <div class="user-role-tag">${u.role}</div>
+        <div class="user-role-tag">${roleLabel(u)}${hasPendingRoles(u) ? ` · <span style="color:var(--accent);">${u.pendingRoles.length} awaiting approval</span>` : ''}</div>
       </div>
       <span style="color:var(--text-muted)">${icons.chevron}</span>
     </div>`;
@@ -6416,7 +6439,7 @@ function buildUserDetail() {
           ${u.avatar
             ? `<img src="${u.avatar}" style="width:90px;height:90px;border-radius:50%;object-fit:cover;"/>`
             : `<div class="profile-avatar">${getInitials(u.firstName, u.lastName)}</div>`}
-          <div class="role-badge">${u.role}</div>
+          <div class="role-badge">${roleLabel(u)}</div>
           ${u.avatar ? `<button onclick="removeUserAvatar('${u.id}')" style="background:none;border:none;color:var(--red);font-size:13px;font-weight:600;cursor:pointer;margin-top:2px;">✕ Remove photo</button>` : ''}
         </div>
         <!-- Fields — read-only until 'Edit Details' is tapped, same pattern as the profile screen -->
@@ -6440,10 +6463,46 @@ function buildUserDetail() {
           </div>
           <div class="input-group"><label class="input-label">Email</label><input class="input-field" value="${u.email}" readonly style="opacity:0.6;"/></div>
           <div class="input-group">
-            <label class="input-label">Role</label>
-            <select id="ud-role" onchange="setUdField('role', this.value)">
-              ${['Administrator','Captain','Player','Supporter'].map(r=>`<option value="${r}" ${(f.role ?? u.role)===r?'selected':''}>${r}</option>`).join('')}
-            </select>
+            <label class="input-label">Plays for the club</label>
+            <div class="role-buttons">
+              <button class="role-btn ${f.plays ? 'active' : ''}" onclick="setUdPlays(true)">Yes</button>
+              <button class="role-btn ${f.plays ? '' : 'active'}" onclick="setUdPlays(false)">No</button>
+            </div>
+          </div>
+
+          <div class="input-group">
+            <label class="input-label">Club roles</label>
+            ${POSITIONAL_ROLES.map(r => {
+              const held = (f.tags || []).includes(r.key);
+              const requested = (f.pending || []).includes(r.key);
+              return `
+              <div class="notif-option" onclick="toggleUdRole('${r.key}')">
+                <div class="notif-checkbox ${held ? 'checked' : ''}">
+                  ${held ? `<svg viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="3" width="13" height="13"><polyline points="20 6 9 17 4 12"/></svg>` : ''}
+                </div>
+                <div style="flex:1;">
+                  <div class="notif-label">${r.label}${requested ? ` <span style="color:var(--accent);font-weight:600;">· requested</span>` : ''}</div>
+                  <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">${requested ? 'Asked for this at sign-up — tick to approve' : r.note}</div>
+                </div>
+                ${requested ? `<button onclick="event.stopPropagation();declineUdRole('${r.key}')" style="background:none;border:none;color:var(--red);font-size:18px;line-height:1;cursor:pointer;padding:0 4px;" title="Decline this request">✕</button>` : ''}
+              </div>`;
+            }).join('')}
+          </div>
+
+          <!-- Kept visually apart from the club roles above on purpose: this is a
+               permission, not a description of someone. It grants the ability to
+               edit and delete every member. -->
+          <div class="input-group" style="border-top:1px solid var(--border);padding-top:14px;margin-top:4px;">
+            <label class="input-label">App access</label>
+            <div class="notif-option" onclick="toggleUdAdmin('${u.id}')">
+              <div class="notif-checkbox ${f.isAppAdmin ? 'checked' : ''}">
+                ${f.isAppAdmin ? `<svg viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="3" width="13" height="13"><polyline points="20 6 9 17 4 12"/></svg>` : ''}
+              </div>
+              <div>
+                <div class="notif-label">App Administrator</div>
+                <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">Full access — create and edit events, publish announcements, edit and delete any member</div>
+              </div>
+            </div>
           </div>
           ` : `
           <div class="input-group"><label class="input-label">First name</label><div class="input-field" style="color:var(--text-muted);">${u.firstName}</div></div>
@@ -6451,7 +6510,12 @@ function buildUserDetail() {
           <div class="input-group"><label class="input-label">Preferred name</label><div class="input-field" style="color:var(--text-muted);">${u.nickname || '—'}</div></div>
           <div class="input-group"><label class="input-label">Mobile</label><div class="input-field" style="color:var(--text-muted);">${u.mobile || '—'}</div></div>
           <div class="input-group"><label class="input-label">Email</label><div class="input-field" style="color:var(--text-muted);">${u.email}</div></div>
-          <div class="input-group"><label class="input-label">Role</label><div class="input-field" style="color:var(--text-muted);">${u.role}</div></div>
+          <div class="input-group"><label class="input-label">Roles</label><div class="input-field" style="color:var(--text-muted);">${roleLabel(u)}</div></div>
+          ${hasPendingRoles(u) ? `
+          <div class="input-group">
+            <label class="input-label">Awaiting approval</label>
+            <div class="input-field" style="color:var(--accent);">${u.pendingRoles.map(r => ROLE_LABELS[r] || r).join(' · ')}</div>
+          </div>` : ''}
           `}
         </div>
 
@@ -6471,6 +6535,18 @@ function buildUserDetail() {
 function buildModal() {
   const m = state.modal;
   if (m.type === 'datetime') return buildDateTimeWheelModal();
+  if (m.type === 'confirmAdmin') {
+    const target = state.users.find(x => x.id === m.id);
+    return `<div class="modal-overlay" onclick="closeModal(event)">
+      <div class="modal-sheet">
+        <div class="modal-handle"></div>
+        <div class="modal-title">Make ${target ? target.firstName : 'this member'} an App Administrator?</div>
+        <div class="modal-body">They will be able to create and edit events, publish announcements, and edit or delete any member's profile — including yours. Only give this to people who run the app.</div>
+        <button class="btn-primary" onclick="confirmMakeAdmin()">Yes, make them an admin</button>
+        <button class="btn-secondary" onclick="closeModal(null, true)">Cancel</button>
+      </div>
+    </div>`;
+  }
   if (m.type === 'noProfilePhoto') {
     return `<div class="modal-overlay" onclick="closeModal(event)">
       <div class="modal-sheet">
@@ -8403,7 +8479,15 @@ window.removeUserAvatar = (id) => {
 window.startEditUserDetail = (id) => {
   const u = state.users.find(u => u.id === id);
   if (!u) return;
-  state.userDetailForm = { firstName: u.firstName, lastName: u.lastName, nickname: u.nickname || '', mobile: u.mobile || '', role: u.role };
+  const roles = u.memberRoles || [];
+  state.userDetailForm = {
+    firstName: u.firstName, lastName: u.lastName,
+    nickname: u.nickname || '', mobile: u.mobile || '',
+    plays: roles.includes('player'),
+    tags: roles.filter(r => r !== 'player' && r !== 'supporter'),
+    pending: [...(u.pendingRoles || [])],
+    isAppAdmin: isAppAdmin(u),
+  };
   state.userDetailEditing = true;
   state.error = '';
   render();
@@ -8428,29 +8512,117 @@ window.saveUserDetail = (id) => {
   const ln   = (f.lastName ?? u.lastName).trim();
   const nick = (f.nickname ?? u.nickname ?? '').trim();
   const mob  = (f.mobile ?? u.mobile ?? '').trim();
-  const role = f.role ?? u.role;
 
   if (!fn) { state.error = 'First name is required.'; render(); return; }
   if (!ln) { state.error = 'Last name is required.'; render(); return; }
 
   state.error = '';
-  // Only is_app_admin is derived from the old dropdown — it maps 1:1 onto
-  // 'Administrator'. member_roles is deliberately left alone: the four old
-  // values can't express a playing admin or a positional tag, so deriving
-  // tags from them here would silently demote Seth/Harry to supporter (and
-  // wipe any coach/captain/committee tag) every time someone's name is edited.
-  // Tag editing gets its own control alongside the approval queue.
-  const isAdminRole = role === 'Administrator';
-  u.firstName = fn; u.lastName = ln; u.nickname = nick; u.mobile = mob; u.role = role;
-  u.isAppAdmin = isAdminRole;
+
+  const wasAdmin     = isAppAdmin(u);
+  const wasCommittee = (u.memberRoles || []).includes('committee');
+  const nowAdmin     = !!f.isAppAdmin;
+  const memberRoles  = [f.plays ? 'player' : 'supporter', ...(f.tags || [])];
+  const nowCommittee = memberRoles.includes('committee');
+
+  // Caught here as well as by the database trigger so the admin sees a real
+  // sentence rather than a raw Postgres error. The trigger is still the actual
+  // guarantee — it also covers the delete-account Worker, which bypasses RLS.
+  if (wasAdmin && !nowAdmin) {
+    const othersLeft = state.users.filter(x => x.id !== id && isAppAdmin(x)).length;
+    if (othersLeft === 0) {
+      state.error = 'This is the only App Administrator. Make someone else an administrator first.';
+      render();
+      return;
+    }
+  }
+
+  // Legacy `role` is still written so anything not yet migrated keeps working.
+  const legacyRole = nowAdmin ? 'Administrator'
+    : (f.tags || []).includes('captain') ? 'Captain'
+    : f.plays ? 'Player' : 'Supporter';
+
+  u.firstName = fn; u.lastName = ln; u.nickname = nick; u.mobile = mob;
+  u.memberRoles = memberRoles;
+  u.pendingRoles = f.pending || [];
+  u.isAppAdmin = nowAdmin;
+  u.role = legacyRole;
+
   sb.update('profiles', {
-    first_name: fn, last_name: ln, nickname: nick, mobile: mob, role,
-    is_app_admin: isAdminRole,
+    first_name: fn, last_name: ln, nickname: nick, mobile: mob,
+    role: legacyRole,
+    member_roles: memberRoles,
+    pending_roles: u.pendingRoles,
+    is_app_admin: nowAdmin,
   }, { id });
+
+  // Tell people when their access changes — in both directions. Silently
+  // removing someone's admin is worse than silently granting it.
+  const restartNote = ' Close and reopen the app to see the change.';
+  if (!wasAdmin && nowAdmin) {
+    sendPushNotificationToUsers('You are now an App Administrator',
+      `${CLUB_CONFIG.clubName} has given you full access to manage the app.${restartNote}`,
+      `${CLUB_CONFIG.appUrl}/`, [id]);
+  } else if (wasAdmin && !nowAdmin) {
+    sendPushNotificationToUsers('Your app access has changed',
+      `You are no longer an App Administrator. You are now: ${roleLabel(u)}.${restartNote}`,
+      `${CLUB_CONFIG.appUrl}/`, [id]);
+  }
+  if (!wasCommittee && nowCommittee) {
+    sendPushNotificationToUsers('You have been added to the Committee',
+      `You will now receive committee notices from ${CLUB_CONFIG.clubName}.${restartNote}`,
+      `${CLUB_CONFIG.appUrl}/`, [id]);
+  } else if (wasCommittee && !nowCommittee) {
+    sendPushNotificationToUsers('Your club roles have changed',
+      `You have been removed from the Committee. You are now: ${roleLabel(u)}.${restartNote}`,
+      `${CLUB_CONFIG.appUrl}/`, [id]);
+  }
+
   state.userDetailEditing = false;
   state.userDetailForm = {};
   showToast('User saved!');
   navigate('userlist');
+};
+
+window.setUdPlays = (plays) => {
+  state.userDetailForm.plays = plays;
+  render(true);
+};
+
+// Ticking a role that was requested at sign-up is what approves it — the
+// request moves out of pending in the same action.
+window.toggleUdRole = (key) => {
+  const f = state.userDetailForm;
+  f.tags = f.tags || [];
+  if (f.tags.includes(key)) {
+    f.tags = f.tags.filter(r => r !== key);
+  } else {
+    f.tags = [...f.tags, key];
+    f.pending = (f.pending || []).filter(r => r !== key);
+  }
+  render(true);
+};
+
+window.declineUdRole = (key) => {
+  const f = state.userDetailForm;
+  f.pending = (f.pending || []).filter(r => r !== key);
+  render(true);
+};
+
+window.toggleUdAdmin = (id) => {
+  const f = state.userDetailForm;
+  if (f.isAppAdmin) {
+    f.isAppAdmin = false;
+    render(true);
+    return;
+  }
+  state.modal = { type: 'confirmAdmin', id };
+  render(true);
+};
+
+window.confirmMakeAdmin = () => {
+  state.userDetailForm.isAppAdmin = true;
+  state.modal = null;
+  render(true);
 };
 
 window.deleteUser = (id) => {
