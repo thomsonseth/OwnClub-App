@@ -2753,19 +2753,21 @@ async function handleJoin() {
   if (!state.user) return;
   if (state.joinForm.loading) return;
   const { nickname, role, avatarPreview } = state.joinForm;
+  const requested = state.joinForm.requestedRoles || [];
 
   state.joinForm.loading = true;
   render(true);
 
-  // Special roles (Administrator/Captain) can only be assigned by an
-  // existing Administrator via Manage Users — never self-selected here.
   const finalRole = role === 'player' ? 'Player' : 'Supporter';
 
   state.user.nickname = nickname || state.user.firstName;
   state.user.role = finalRole;
-  // New model: a fresh member is exactly one of these. Positional tags
-  // (coach/captain/committee) are admin-granted and never self-selected.
+  // Playing status is the only thing a new member sets themselves. Coach,
+  // Captain and Committee go to pending_roles and grant nothing until an
+  // administrator approves them in Manage Users — otherwise anyone signing up
+  // could tick Committee and start receiving committee notices.
   state.user.memberRoles = [finalRole === 'Player' ? 'player' : 'supporter'];
+  state.user.pendingRoles = requested;
   state.user.isAppAdmin = false;
   state.user.onboardingComplete = true;
   if (avatarPreview) state.user.avatar = avatarPreview;
@@ -2778,6 +2780,7 @@ async function handleJoin() {
       nickname: state.user.nickname,
       role: state.user.role,          // dual-written until every read path is migrated
       member_roles: state.user.memberRoles,
+      pending_roles: state.user.pendingRoles,
       is_app_admin: false,
       avatar_url: state.user.avatar || null,
       onboarding_complete: true,
@@ -2795,9 +2798,14 @@ async function handleJoin() {
     .filter(a => isAppAdmin(a) && a.notifyNewMembers !== false && a.id !== state.user.id)
     .map(a => a.id);
   if (adminIds.length) {
+    // Requested roles are called out by name: they need an admin to action
+    // them in Manage Users, and nothing else in the app chases that up.
+    const asked = requested.map(r => ROLE_LABELS[r] || r).join(', ');
     sendPushNotificationToUsers(
-      'New member joined',
-      `${state.user.firstName} ${state.user.lastName} just joined as ${finalRole}`,
+      asked ? 'New member joined — approval needed' : 'New member joined',
+      asked
+        ? `${state.user.firstName} ${state.user.lastName} joined as ${finalRole} and asked to be added as ${asked}. Approve in Manage Users.`
+        : `${state.user.firstName} ${state.user.lastName} just joined as ${finalRole}`,
       `${CLUB_CONFIG.appUrl}/#screen=userlist`,
       adminIds,
     );
@@ -3082,7 +3090,7 @@ function navigate(screen, extra = {}) {
   state.screen = screen;
   state.error = '';
   if (screen === 'profile') state.profileEditing = false;
-  if (screen === 'joinclub') state.joinForm = { nickname: '', role: 'player', loading: false, avatarPreview: null };
+  if (screen === 'joinclub') state.joinForm = { nickname: '', role: 'player', loading: false, avatarPreview: null, requestedRoles: [] };
   if (['login','signup','forgotpassword','splash','emailconfirmed'].includes(screen)) {
     state.loading = false;
   }
@@ -4181,11 +4189,33 @@ function buildJoinClub() {
             <input class="input-field" id="join-nick" placeholder="How should we call you?" value="${nickname}"/>
           </div>
           <div class="input-group">
-            <label class="input-label">Join as</label>
+            <label class="input-label">Do you play for the club?</label>
             <div class="role-buttons">
-              <button class="role-btn ${role==='player'?'active':''}" onclick="setJoinRole('player')">Player</button>
-              <button class="role-btn ${role==='supporter'?'active':''}" onclick="setJoinRole('supporter')">Supporter</button>
+              <button class="role-btn ${role==='player'?'active':''}" onclick="setJoinRole('player')">Yes</button>
+              <button class="role-btn ${role==='supporter'?'active':''}" onclick="setJoinRole('supporter')">No</button>
             </div>
+          </div>
+
+          <!-- Optional, and admin-approved. Nothing here grants anything at
+               sign-up: these go to pending_roles and an administrator decides.
+               Otherwise anyone registering could tick Committee and start
+               receiving committee notices. -->
+          <div class="input-group">
+            <label class="input-label">Do you hold any of these roles? <span style="font-weight:400;color:var(--text-muted);">(optional)</span></label>
+            ${POSITIONAL_ROLES.map(r => {
+              const on = (state.joinForm.requestedRoles || []).includes(r.key);
+              return `
+              <div class="notif-option" onclick="toggleJoinRoleRequest('${r.key}')">
+                <div class="notif-checkbox ${on ? 'checked' : ''}">
+                  ${on ? `<svg viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="3" width="13" height="13"><polyline points="20 6 9 17 4 12"/></svg>` : ''}
+                </div>
+                <div><div class="notif-label">${r.label}</div></div>
+              </div>`;
+            }).join('')}
+            ${(state.joinForm.requestedRoles || []).length ? `
+            <div style="font-size:12px;color:var(--text-muted);margin-top:8px;">
+              An administrator will confirm this before it takes effect. You can join and start using the app straight away.
+            </div>` : ''}
           </div>
 
         </div>
@@ -7317,6 +7347,14 @@ window.skipPhotoAndJoin = () => {
 };
 
 window.setJoinRole = (role) => { state.joinForm.role = role; render(); };
+
+window.toggleJoinRoleRequest = (key) => {
+  const list = state.joinForm.requestedRoles || [];
+  state.joinForm.requestedRoles = list.includes(key)
+    ? list.filter(r => r !== key)
+    : [...list, key];
+  render(true);
+};
 
 window.handleSetNewPassword = async () => {
   const newPass = document.getElementById('new-password')?.value || '';
