@@ -166,6 +166,26 @@
   .crest-name { font-size: 13px; font-weight: 600; color: var(--text); line-height: 1.3; }
   .crest-vs { font-size: 12px; font-weight: 700; color: var(--text-dim); letter-spacing: 1px; flex-shrink: 0; }
 
+  /* ── STACKED TEAM ROWS (match cards) ── */
+  .team-rows { display: flex; flex-direction: column; gap: 6px; }
+  .team-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .team-crest {
+    width: 26px; height: 26px; flex-shrink: 0;
+    object-fit: contain; border-radius: 50%;
+    background: #fff; padding: 2px;
+  }
+  /* Keeps both rows aligned when a club has no crest (or a manual match) */
+  .team-crest-fallback {
+    width: 26px; height: 26px; flex-shrink: 0;
+    border-radius: 50%; background: var(--surface2);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 700; color: var(--text-dim);
+  }
+  .team-row-name {
+    font-size: 15px; font-weight: 700; color: var(--text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+  }
+
   /* ── TOP BANNER ── */
   .top-banner {
     background: var(--bg);
@@ -539,8 +559,8 @@
   .arrow-slider-card:active { opacity: 0.75; }
   /* Every card in a slider is the same height, so paging through doesn't
      resize the section and shunt the page around. */
-  .arrow-slider-card.match-slide  { min-height: 132px; }
-  .arrow-slider-card.social-slide { min-height: 132px; }
+  .arrow-slider-card.match-slide  { min-height: 152px; }
+  .arrow-slider-card.social-slide { min-height: 152px; }
   /* Titles stay on one line — a wrapped opponent name was the main thing
      making cards different heights. */
   .slide-title {
@@ -4158,9 +4178,9 @@ function buildHome() {
 
   // Match card builder
   function buildMatchSlideCard(m) {
-    // Short form ("Laurimar v Dennis") — PlayHQ's full names ("Laurimar 1st
-    // XI vs Dennis 1st XI") wrap to two lines on a phone. The grade leads the
-    // line above, so nothing is lost.
+    // Home above away, crests to the left. Full names are fine stacked — it
+    // was only the single-line "A vs B" form that wrapped on a phone. Falls
+    // back to that short form if a match has no team names at all.
     const shortTitle = (m.homeTeam && m.awayTeam)
       ? `${shortMatchTeam(m.homeTeam)} v ${shortMatchTeam(m.awayTeam)}`
       : m.title;
@@ -4172,7 +4192,7 @@ function buildHome() {
         <div style="font-size:11px;font-weight:600;color:var(--accent);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
           ${m.grade ? `<span style="color:var(--text);">${m.grade}</span><span style="color:var(--text-dim);"> · </span>` : ''}${formatDate(m.date)}
         </div>
-        <div class="slide-title">${shortTitle}</div>
+        ${buildTeamRows(m) || `<div class="slide-title">${shortTitle}</div>`}
         <div style="font-size:13px;color:var(--text-muted);display:flex;align-items:center;gap:4px;">${icons.clock} ${formatTime(m.time)}</div>
         <div style="font-size:13px;color:var(--text-muted);display:flex;align-items:center;gap:4px;margin-top:3px;">${icons.mappin} ${m.location}</div>
         ${chip ? `<div style="margin-top:8px;font-size:12px;background:var(--surface2);border-radius:8px;padding:4px 8px;display:inline-block;color:var(--text-muted);">${chip}</div>` : ''}
@@ -4482,7 +4502,7 @@ function buildEventCard(ev, isAdmin) {
   return `<div class="event-card ${isCancelled ? 'cancelled' : ''}" onclick="${onclick}" style="${isCancelled ? 'opacity:0.55;' : ''}">
     <div style="display:flex;gap:12px;align-items:flex-start;">
       <div style="flex:1;min-width:0;">
-        <div class="event-card-title" style="${isCancelled ? 'text-decoration:line-through;color:var(--text-muted);' : ''}">${ev.title}</div>
+        ${buildTeamRows(ev, isCancelled) || `<div class="event-card-title" style="${isCancelled ? 'text-decoration:line-through;color:var(--text-muted);' : ''}">${ev.title}</div>`}
         ${matchSubtitle ? `<div style="font-size:12px;color:var(--accent);font-weight:600;margin-top:2px;">${matchSubtitle}</div>` : ''}
         <div class="event-card-meta">
           <span>${formatDate(ev.date)}</span>
@@ -4621,6 +4641,22 @@ function buildEvents() {
 // Head-to-head crests for a match, the way PlayHQ presents a fixture. Only
 // imported fixtures carry crests (PlayHQ is the source), and a club without
 // one on PlayHQ falls back to its initial so both sides stay aligned.
+// Home team above away team, each with its crest to the left — the layout
+// PlayHQ's own fixture list uses. Falls back to the club's initial so rows
+// stay aligned for a club with no crest, or a manually scheduled match.
+function buildTeamRows(ev, cancelled = false) {
+  if (ev.type !== 'match' || !ev.homeTeam || !ev.awayTeam) return '';
+  const row = (name, logo) => `
+    <div class="team-row">
+      ${logo
+        ? `<img class="team-crest" src="${logo}" alt="" loading="lazy"
+             onerror="this.outerHTML='<div class=\'team-crest-fallback\'>${(name || '?').trim().charAt(0).toUpperCase()}</div>'"/>`
+        : `<div class="team-crest-fallback">${(name || '?').trim().charAt(0).toUpperCase()}</div>`}
+      <span class="team-row-name" style="${cancelled ? 'text-decoration:line-through;color:var(--text-muted);' : ''}">${name}</span>
+    </div>`;
+  return `<div class="team-rows">${row(ev.homeTeam, ev.homeLogo)}${row(ev.awayTeam, ev.awayLogo)}</div>`;
+}
+
 function buildMatchCrests(ev) {
   if (ev.type !== 'match' || !ev.homeTeam || !ev.awayTeam) return '';
   if (!ev.homeLogo && !ev.awayLogo) return '';
