@@ -2205,7 +2205,9 @@ function resolveAudience(groups, users) {
 }
 
 function audienceSummary(groups, users) {
-  const g = Array.isArray(groups) && groups.length ? groups : ['all'];
+  // An empty array here means "not chosen yet", which is different from a
+  // missing value — so it must not fall back to 'all' the way stored rows do.
+  const g = Array.isArray(groups) ? groups : ['all'];
   if (g.includes('all')) return 'Everyone in the club';
   const names = AUDIENCE_GROUPS.filter(x => g.includes(x.key)).map(x => x.label);
   const extra = (users || []).length;
@@ -2216,7 +2218,10 @@ function audienceSummary(groups, users) {
 // Shared by the announcement and event forms. Handler names are passed as
 // strings because these render into onclick attributes.
 function buildAudiencePicker(groups, users, toggleGroupFn, toggleUserFn, expandFn, expanded) {
-  const g = Array.isArray(groups) && groups.length ? groups : ['all'];
+  // Empty means "nothing chosen yet" and must render as such. Coercing it to
+  // ['all'] here is what made unticking Everyone appear to do nothing: state
+  // cleared correctly, then the picker drew it as ticked again.
+  const g = Array.isArray(groups) ? groups : ['all'];
   const all = g.includes('all');
   const chosen = users || [];
   const box = (on, label, note, onclick) => `
@@ -2227,18 +2232,22 @@ function buildAudiencePicker(groups, users, toggleGroupFn, toggleUserFn, expandF
       <div><div class="notif-label">${label}</div>${note ? `<div style="font-size:12px;color:var(--text-muted);margin-top:2px;">${note}</div>` : ''}</div>
     </div>`;
 
+  // Categories first, then "Everyone" as the catch-all beneath them, then
+  // individuals. Ticking "Everyone" collapses everything above and below it,
+  // since those choices no longer mean anything — but it stays on screen so
+  // it can always be unticked again.
   return `
-    ${box(all, 'Everyone in the club', '', `${toggleGroupFn}('all')`)}
+    ${all ? '' : AUDIENCE_GROUPS.map(x => box(g.includes(x.key), x.label, '', `${toggleGroupFn}('${x.key}')`)).join('')}
+    ${box(all, 'Everyone in the club', all ? 'Untick to choose specific groups' : '', `${toggleGroupFn}('all')`)}
     ${all ? '' : `
-      <div style="margin-left:8px;border-left:2px solid var(--border);padding-left:10px;">
-        ${AUDIENCE_GROUPS.map(x => box(g.includes(x.key), x.label, '', `${toggleGroupFn}('${x.key}')`)).join('')}
-        <div style="font-size:13px;font-weight:600;color:var(--text-muted);margin:10px 0 4px;cursor:pointer;" onclick="${expandFn}()">
-          ${expanded ? '▾' : '▸'} Also send to specific people${chosen.length ? ` (${chosen.length})` : ''}
-        </div>
-        ${expanded ? state.users.filter(u => u.onboardingComplete)
-            .map(u => box(chosen.includes(u.id), `${u.firstName} ${u.lastName}`, roleLabel(u), `${toggleUserFn}('${u.id}')`))
-            .join('') : ''}
-      </div>`}
+      <div style="font-size:13px;font-weight:600;color:var(--text-muted);margin:10px 0 4px;cursor:pointer;" onclick="${expandFn}()">
+        ${expanded ? '▾' : '▸'} Also send to specific people${chosen.length ? ` (${chosen.length})` : ''}
+      </div>
+      ${expanded ? `<div style="margin-left:8px;border-left:2px solid var(--border);padding-left:10px;">
+        ${state.users.filter(u => u.onboardingComplete)
+          .map(u => box(chosen.includes(u.id), `${u.firstName} ${u.lastName}`, roleLabel(u), `${toggleUserFn}('${u.id}')`))
+          .join('')}
+      </div>` : ''}`}
     <div style="font-size:12px;color:var(--text-muted);margin-top:8px;">
       Goes to: <span style="color:var(--accent);font-weight:600;">${audienceSummary(g, chosen)}</span>
     </div>`;
@@ -2269,12 +2278,28 @@ function visibleEvents(list = state.events) {
   return list.filter(e => e.type === 'match' || canSeeContent(e));
 }
 
+// 'all' and the specific groups are alternatives, not additive: ticking a
+// group clears 'all', and ticking 'all' clears the groups.
+//
+// Every branch here is a genuine toggle. An earlier version returned ['all']
+// unconditionally for the 'all' key, which made it a one-way door — once
+// ticked it could never be cleared, and because the other options were hidden
+// while it was on, the whole picker locked up.
+//
+// Clearing the last group leaves the selection empty rather than snapping back
+// to 'all'. Empty is a legitimate half-finished state while someone is still
+// choosing; publishing with it is what's blocked, in the publish handlers.
 function toggleAudienceGroup(current, key) {
-  const g = Array.isArray(current) && current.length ? current : ['all'];
-  if (key === 'all') return ['all'];
+  const g = Array.isArray(current) ? current : [];
+  if (key === 'all') return g.includes('all') ? [] : ['all'];
   const without = g.filter(x => x !== 'all');
-  const next = without.includes(key) ? without.filter(x => x !== key) : [...without, key];
-  return next.length ? next : ['all'];
+  return without.includes(key) ? without.filter(x => x !== key) : [...without, key];
+}
+
+// Nothing selected at all — blocks publishing rather than silently sending
+// to everyone or to nobody.
+function audienceIsEmpty(groups, users) {
+  return !(Array.isArray(groups) && groups.length) && !(Array.isArray(users) && users.length);
 }
 
 // ── Map Supabase event row → app event object ─────────────────────────────
@@ -3445,6 +3470,11 @@ async function handleCreateEvent() {
     if (!f.opponent || !f.grade || !f.date) { state.error = 'Opponent, grade and date are required.'; render(); return; }
   } else {
     if (!f.title || !f.date) { state.error = 'Title and date are required.'; render(); return; }
+    // Matches skip this — they carry no picker and are always club-wide.
+    if (audienceIsEmpty(f.audienceGroups, f.audienceUsers)) {
+      state.error = 'Choose who this goes to — pick at least one group, some individuals, or Everyone in the club.';
+      render(); return;
+    }
   }
   const matchTitle = isMatch
     ? (f.homeAway === 'Away' ? `${f.opponent} vs ${CLUB_CONFIG.clubShortName}` : `${CLUB_CONFIG.clubShortName} vs ${f.opponent}`)
@@ -8525,6 +8555,10 @@ window.publishAnnouncement = async () => {
 
   if (!title) { state.error = 'Please enter a title.'; render(true); return; }
   if (!body)  { state.error = 'Please enter a message.'; render(true); return; }
+  if (audienceIsEmpty(f.audienceGroups, f.audienceUsers)) {
+    state.error = 'Choose who this goes to — pick at least one group, some individuals, or Everyone in the club.';
+    render(true); return;
+  }
 
   const u = state.user;
   const reset = () => {
