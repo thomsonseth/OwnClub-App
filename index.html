@@ -2124,6 +2124,7 @@ function profileToUser(p) {
     role: p.role || 'Player',
     memberRoles: Array.isArray(p.member_roles) ? p.member_roles : [],
     pendingRoles: Array.isArray(p.pending_roles) ? p.pending_roles : [],
+    pendingRolesSince: p.pending_roles_since || null,
     isAppAdmin: p.is_app_admin === true,
     avatar: p.avatar_url || null,
     onboardingComplete: p.onboarding_complete === true,
@@ -2781,6 +2782,8 @@ async function handleJoin() {
       role: state.user.role,          // dual-written until every read path is migrated
       member_roles: state.user.memberRoles,
       pending_roles: state.user.pendingRoles,
+      // Starts the 24h clock the reminders Worker chases admins against.
+      pending_roles_since: requested.length ? new Date().toISOString() : null,
       is_app_admin: false,
       avatar_url: state.user.avatar || null,
       onboarding_complete: true,
@@ -2804,9 +2807,13 @@ async function handleJoin() {
     sendPushNotificationToUsers(
       asked ? 'New member joined — approval needed' : 'New member joined',
       asked
-        ? `${state.user.firstName} ${state.user.lastName} joined as ${finalRole} and asked to be added as ${asked}. Approve in Manage Users.`
+        ? `${state.user.firstName} ${state.user.lastName} joined as ${finalRole} and asked to be added as ${asked}. Tap to review.`
         : `${state.user.firstName} ${state.user.lastName} just joined as ${finalRole}`,
-      `${CLUB_CONFIG.appUrl}/#screen=userlist`,
+      // A request opens straight into that member's editing form; a plain
+      // join just goes to the list.
+      asked
+        ? `${CLUB_CONFIG.appUrl}/#screen=userdetail&id=${state.user.id}&edit=1`
+        : `${CLUB_CONFIG.appUrl}/#screen=userlist`,
       adminIds,
     );
   }
@@ -6215,7 +6222,8 @@ function buildMenu() {
     { icon: icons.doc,       label: 'Registration',     screen: 'registration' },
     { icon: icons.shop,      label: 'Shop',             screen: 'shop' },
     { icon: icons.settings,  label: 'Settings',         screen: 'settings' },
-    ...(isAdmin ? [{ icon: icons.users, label: 'User List', screen: 'userlist' }] : []),
+    ...(isAdmin ? [{ icon: icons.users, label: 'User List', screen: 'userlist',
+                     badge: state.users.filter(hasPendingRoles).length }] : []),
     ...(isAdmin ? [{ icon: '🎟',        label: 'Payments (Square)', screen: 'adminsquare' }] : []),
   ];
 
@@ -6223,6 +6231,7 @@ function buildMenu() {
     <button class="menu-item" onclick="navigate('${item.screen}')">
       <span class="menu-item-icon">${item.icon}</span>
       <span class="menu-item-text">${item.label}</span>
+      ${item.badge ? `<span style="background:var(--accent);color:#000;font-size:12px;font-weight:700;min-width:20px;height:20px;border-radius:10px;display:inline-flex;align-items:center;justify-content:center;padding:0 6px;">${item.badge}</span>` : ''}
       <span class="menu-chevron">${icons.chevron}</span>
     </button>`).join('');
 
@@ -6427,7 +6436,11 @@ function buildSettings() {
 
 // ── USER LIST ─────────────────────────────────────────────────────────────
 function buildUserList() {
-  const items = state.users.map(u => {
+  // Members waiting on an approval float to the top — an admin opening this
+  // list from the menu (rather than from a notification) should not have to
+  // scan an alphabetical list to find what needs actioning.
+  const awaiting = state.users.filter(hasPendingRoles);
+  const items = [...awaiting, ...state.users.filter(u => !hasPendingRoles(u))].map(u => {
     const avatarHtml = u.avatar
       ? `<div style="width:40px;height:40px;border-radius:50%;overflow:hidden;flex-shrink:0;"><img src="${u.avatar}" style="width:100%;height:100%;object-fit:cover;"/></div>`
       : `<div class="user-avatar">${getInitials(u.firstName, u.lastName)}</div>`;
@@ -6445,6 +6458,16 @@ function buildUserList() {
     ${buildTopBanner({ title: 'User List', showBack: true })}
     <div class="screen-scroll">
       <div class="user-list-content">
+        ${awaiting.length ? `
+        <div style="background:var(--surface2);border-left:3px solid var(--accent);border-radius:8px;padding:12px 14px;">
+          <div style="font-weight:700;font-size:14px;color:var(--accent);">Action required</div>
+          <div style="font-size:13px;color:var(--text-muted);margin-top:3px;">
+            ${awaiting.length === 1
+              ? `${awaiting[0].firstName} ${awaiting[0].lastName} is waiting on a role approval.`
+              : `${awaiting.length} members are waiting on role approvals.`}
+            Tap them below to review.
+          </div>
+        </div>` : ''}
         <button class="btn-primary" style="display:flex;align-items:center;justify-content:center;gap:8px;" onclick="exportUsers()">
           ${icons.download} Export all
         </button>
@@ -8562,6 +8585,12 @@ window.saveUserDetail = (id) => {
   const memberRoles  = [f.plays ? 'player' : 'supporter', ...(f.tags || [])];
   const nowCommittee = memberRoles.includes('committee');
 
+  // Roles that were outstanding when this screen opened and are now held —
+  // i.e. the admin approved them in this save.
+  const wasPending = u.pendingRoles || [];
+  const approved   = wasPending.filter(r => memberRoles.includes(r));
+  const stillPending = f.pending || [];
+
   // Caught here as well as by the database trigger so the admin sees a real
   // sentence rather than a raw Postgres error. The trigger is still the actual
   // guarantee — it also covers the delete-account Worker, which bypasses RLS.
@@ -8590,8 +8619,13 @@ window.saveUserDetail = (id) => {
     role: legacyRole,
     member_roles: memberRoles,
     pending_roles: u.pendingRoles,
+    // Stops the 24h chase once nothing is outstanding; leaves the original
+    // request time alone if some of it is still waiting, so a partial
+    // approval doesn't reset the clock on what's left.
+    pending_roles_since: stillPending.length ? (u.pendingRolesSince || new Date().toISOString()) : null,
     is_app_admin: nowAdmin,
   }, { id });
+  u.pendingRolesSince = stillPending.length ? (u.pendingRolesSince || new Date().toISOString()) : null;
 
   // Tell people when their access changes — in both directions. Silently
   // removing someone's admin is worse than silently granting it.
@@ -8605,7 +8639,16 @@ window.saveUserDetail = (id) => {
       `You are no longer an App Administrator. You are now: ${roleLabel(u)}.${restartNote}`,
       `${CLUB_CONFIG.appUrl}/`, [id]);
   }
-  if (!wasCommittee && nowCommittee) {
+  // Someone who asked for a role at sign-up gets told it came through. This
+  // takes precedence over the generic committee message below so an approved
+  // committee request produces one notification, not two.
+  if (approved.length) {
+    const names = approved.map(r => ROLE_LABELS[r] || r).join(', ');
+    sendPushNotificationToUsers('Request approved',
+      `You have been added as ${names}.${restartNote}`,
+      `${CLUB_CONFIG.appUrl}/`, [id]);
+  }
+  if (!wasCommittee && nowCommittee && !approved.includes('committee')) {
     sendPushNotificationToUsers('You have been added to the Committee',
       `You will now receive committee notices from ${CLUB_CONFIG.clubName}.${restartNote}`,
       `${CLUB_CONFIG.appUrl}/`, [id]);
@@ -10044,6 +10087,23 @@ function handleDeepLink(hashOverride) {
     state.activeTab = 'menu';
     navigate('userlist');
     forceBackTarget('menu');
+  } else if (screen === 'userdetail' && id) {
+    // Only admins can open someone else's record — a non-admin tapping a
+    // stale or forwarded link lands on their own profile instead of a
+    // screen full of another member's contact details.
+    if (!isAppAdmin()) {
+      state.activeTab = 'menu';
+      navigate('profile');
+    } else {
+      state.activeUserId = id;
+      state.activeTab = 'menu';
+      navigate('userdetail');
+      forceBackTarget('userlist');
+      // edit=1 comes from the "approval needed" push: drop the admin straight
+      // into the editing form with the request already on screen, rather than
+      // making them find and tap Edit Details.
+      if (params.edit === '1') window.startEditUserDetail(id);
+    }
   } else if (screen === 'paymentconfirmation' && id) {
     state.activePaymentOrderId = id;
     state.paymentOrderCache = null;
