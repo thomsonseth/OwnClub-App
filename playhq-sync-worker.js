@@ -65,9 +65,31 @@ function isClubTeam(env, t) {
   return (t.club?.name ?? "").toLowerCase().includes(word) || (t.name ?? "").toLowerCase().includes(word);
 }
 
-async function fetchClubTeams(env, seasonId) {
+// PlayHQ publishes each club's crest at several sizes; take the one closest to
+// what the app renders rather than the largest, to keep list scrolling light.
+const LOGO_TARGET_PX = 128;
+function pickLogo(logo) {
+  const sizes = logo?.sizes;
+  if (!Array.isArray(sizes) || !sizes.length) return null;
+  const best = sizes.reduce((a, b) => {
+    const da = Math.abs((a.dimensions?.width ?? 0) - LOGO_TARGET_PX);
+    const db = Math.abs((b.dimensions?.width ?? 0) - LOGO_TARGET_PX);
+    return db < da ? b : a;
+  });
+  return best?.url ?? null;
+}
+
+// One call gives both this club's teams and a crest for EVERY team in the
+// season — which is how opponents get a logo, since a game's competitors carry
+// only id and name.
+async function fetchSeasonTeams(env, seasonId) {
   const teams = await playhqFetchAll(env, `/v1/seasons/${seasonId}/teams`);
-  return teams
+  const logoById = new Map();
+  for (const t of teams) {
+    const url = pickLogo(t.club?.logo);
+    if (url) logoById.set(t.id, url);
+  }
+  const clubTeams = teams
     .filter((t) => isClubTeam(env, t))
     .map((t) => ({
       id: t.id,
@@ -75,6 +97,7 @@ async function fetchClubTeams(env, seasonId) {
       clubName: t.club?.name ?? null,
       grade: { id: t.grade?.id ?? null, name: t.grade?.name ?? null },
     }));
+  return { clubTeams, logoById };
 }
 
 // Generic club-type words that carry no team identity once the club name is
@@ -142,7 +165,7 @@ function roundNumber(round) {
 // matching, which breaks for clubs whose PlayHQ names differ from their app
 // branding. Game shape: competitors[{id,name,isHomeTeam}],
 // schedule{date,time,timezone}, venue{name}, grade{id,name}, round{name}.
-function mapGame(game, clubTeamIds, team) {
+function mapGame(game, clubTeamIds, team, logoById) {
   const competitors = Array.isArray(game.competitors) ? game.competitors : [];
   const homeComp = competitors.find((c) => c.isHomeTeam);
   const awayComp = competitors.find((c) => !c.isHomeTeam);
@@ -176,6 +199,8 @@ function mapGame(game, clubTeamIds, team) {
     home_team: homeComp.name,
     away_team: awayComp.name,
     home_away: clubTeamIds.has(homeComp.id) ? "Home" : "Away",
+    home_logo: logoById?.get(homeComp.id) ?? null,
+    away_logo: logoById?.get(awayComp.id) ?? null,
     from_schedule: true,
   };
 }
@@ -291,7 +316,7 @@ function deriveMatchTypes(env, rows, gradeCalendar) {
 }
 
 async function collectSeasonFixtures(env, seasonId) {
-  const teams = await fetchClubTeams(env, seasonId);
+  const { clubTeams: teams, logoById } = await fetchSeasonTeams(env, seasonId);
   const clubTeamIds = new Set(teams.map((t) => t.id));
   const calendars = new Map(); // gradeId -> round calendar, fetched once per grade
   const byId = new Map(); // dedupe: two club teams facing each other share one game
@@ -300,7 +325,7 @@ async function collectSeasonFixtures(env, seasonId) {
     const games = await fetchTeamFixture(env, team.id);
     const rows = [];
     for (const game of games) {
-      const row = mapGame(game, clubTeamIds, team);
+      const row = mapGame(game, clubTeamIds, team, logoById);
       if (row) {
         row._roundId = String(game.round?.id || game.round?.name || "");
         rows.push(row);
@@ -482,7 +507,8 @@ export default {
       if (url.pathname === "/teams") {
         const seasonId = url.searchParams.get("season");
         if (!seasonId) return corsJson({ error: "Missing ?season=" }, 400);
-        return corsJson({ data: await fetchClubTeams(env, seasonId) });
+        const { clubTeams, logoById } = await fetchSeasonTeams(env, seasonId);
+        return corsJson({ data: clubTeams, logos: Object.fromEntries(logoById) });
       }
 
       if (url.pathname === "/gradegames") {
