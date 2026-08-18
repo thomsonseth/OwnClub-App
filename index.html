@@ -9883,15 +9883,32 @@ async function pollAll() {
   }
 
   // ── Poll events every 10s ─────────────────────────────────────────────
-  if (now - _lastEventPoll > 10000) {
+  // 60s, not 10s. Fixtures change on the order of days; a ten-second cadence
+  // was re-downloading the whole season to catch an edit that happens weekly.
+  // Resuming the app resets this (see the visibilitychange handler), so coming
+  // back to the app still refreshes immediately rather than waiting out the
+  // interval.
+  if (now - _lastEventPoll > 60000) {
     _lastEventPoll = now;
     try {
-      // image_url excluded here on purpose — it can be a multi-hundred-KB
-      // base64 blob and this poll runs every 10s for as long as the app is
-      // open. The diff below never even reads .image for events we already
-      // know about, so it was pure wasted bandwidth; genuinely new events
-      // get their image fetched separately, once, just below.
-      const evRows = await sb.select('events', 'order=date.asc&select=id,type,title,date,time,finish_time,finish_date,location,description,cost,grade,grade_id,round,home_team,away_team,gender,format,home_away,cancelled,cancel_note,from_schedule,reminder,play_hq_id,notifications,created_by,audience_groups,audience_users');
+      // This poll used to send all 27 columns of every event ever synced, every
+      // 10 seconds — 50 kB a cycle, about 18 MB per device-hour, almost all of
+      // it data that hadn't changed. Three things shrink it:
+      //
+      //  1. Only the columns the diff below actually compares. Everything else
+      //     (grade, teams, format, audience…) is fixed at creation, so it only
+      //     matters for rows we've never seen — and those fetch in full just
+      //     below, the same way image_url already did. 46 kB → 23 kB.
+      //  2. A date window. Finished fixtures are immutable, and full history
+      //     still loads once at startup via loadAppData(). Worth little today
+      //     (PlayHQ loads a whole season ahead, so most rows are upcoming) but
+      //     it stops the payload growing with every season played.
+      //  3. The 60s cadence above.
+      //
+      // image_url stays excluded for the original reason: it can be large and
+      // the diff never reads it for events we already know about.
+      const since = new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 10);
+      const evRows = await sb.select('events', `date=gte.${since}&order=date.asc&select=id,type,title,date,time,finish_time,finish_date,location,description,cost,cancelled,cancel_note`);
       if (Array.isArray(evRows)) {
         const existingIds = new Set(state.events.map(e => e.id));
         const newlyAddedIds = [];
@@ -9920,28 +9937,44 @@ async function pollAll() {
           }
         });
 
+        // Genuinely new rows get fetched in full — the slim poll above knows
+        // nothing about their grade, teams, format, audience or image. Once
+        // per event, ever, rather than for all of them every cycle.
         if (newlyAddedIds.length) {
-          const imgRows = await sb.select('events', `id=in.(${newlyAddedIds.map(id => `"${id}"`).join(',')})&select=id,image_url`);
-          if (Array.isArray(imgRows)) {
-            imgRows.forEach(r => {
-              const ev = state.events.find(e => e.id === r.id);
-              if (ev) ev.image = r.image_url || null;
+          const fullRows = await sb.select('events', `id=in.(${newlyAddedIds.map(id => `"${id}"`).join(',')})&select=*`);
+          if (Array.isArray(fullRows)) {
+            fullRows.forEach(r => {
+              const idx = state.events.findIndex(e => e.id === r.id);
+              if (idx === -1) return;
+              // RSVP and team maps are populated by separate queries; rebuilding
+              // the object from the row would blank them.
+              const { rsvp, rsvpGuests, team } = state.events[idx];
+              state.events[idx] = Object.assign(rowToEvent(r), { rsvp, rsvpGuests, team });
             });
           }
         }
 
-        // Refresh RSVPs
-        const rsvps = await sb.select('rsvps', '');
-        if (Array.isArray(rsvps)) {
-          state.events.forEach(e => { e.rsvp = {}; e.rsvpGuests = {}; });
-          rsvps.forEach(r => {
-            const ev = state.events.find(e => e.id === r.event_id);
-            if (ev) {
-              ev.rsvp[r.user_id] = r.status;
-              if (r.guest_count) ev.rsvpGuests[r.user_id] = r.guest_count;
-            }
-          });
-          changed = true;
+        // Refresh RSVPs — scoped to the same window as the events above, and
+        // resetting only those events' maps. `select *` with no filter grows
+        // at members × events, so it would have become the next version of the
+        // problem this poll's window just solved. Past events keep whatever
+        // loadAppData() gave them; nobody is RSVPing to last season.
+        const windowIds = evRows.map(r => r.id);
+        if (windowIds.length) {
+          const idList = windowIds.map(id => `"${id}"`).join(',');
+          const rsvps = await sb.select('rsvps', `event_id=in.(${idList})`);
+          if (Array.isArray(rsvps)) {
+            const inWindow = new Set(windowIds);
+            state.events.forEach(e => { if (inWindow.has(e.id)) { e.rsvp = {}; e.rsvpGuests = {}; } });
+            rsvps.forEach(r => {
+              const ev = state.events.find(e => e.id === r.event_id);
+              if (ev) {
+                ev.rsvp[r.user_id] = r.status;
+                if (r.guest_count) ev.rsvpGuests[r.user_id] = r.guest_count;
+              }
+            });
+            changed = true;
+          }
         }
 
         if (changed && !isUserTyping() && state.screen !== 'home') render();
@@ -10448,8 +10481,11 @@ document.addEventListener('visibilitychange', () => {
     if (window.location.hash) handleDeepLink();
     // Force the roles check on resume rather than waiting out its interval —
     // this is the moment someone opens the app after tapping a "you are now
-    // an administrator" (or no longer are) notification.
+    // an administrator" (or no longer are) notification. Events too, now that
+    // their cadence is 60s: coming back to the app should show current
+    // fixtures immediately rather than up to a minute of staleness.
     _lastProfilePoll = 0;
+    _lastEventPoll = 0;
     if (state.user) pollAll();
   }
 });
