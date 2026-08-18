@@ -4479,16 +4479,19 @@ function buildEvents() {
       const unofficialKey = CLUB_CONFIG.unofficialMatchLabel;
       if (isAdmin && filter === 'upcoming' && !gradeMap[unofficialKey]) gradeMap[unofficialKey] = [];
 
-      // null means all expanded — initialise with all keys open on first render
+      // null means "not touched yet" — start with every grade collapsed so the
+      // tab opens as a short list of teams rather than a wall of fixtures, and
+      // the member expands the one they care about.
       if (state.expandedGrades === null) {
-        state.expandedGrades = new Set(Object.keys(gradeMap));
+        state.expandedGrades = new Set();
       }
 
-      // The followed team leads the list; everything else keeps its natural
-      // (soonest-fixture) order.
+      // Followed team first, unofficial matches always last, everything else
+      // in its natural (soonest-fixture) order in between.
       const followed = followedTeamOrDefault();
-      const ordered = Object.entries(gradeMap).sort(([a], [b]) =>
-        (b === followed ? 1 : 0) - (a === followed ? 1 : 0));
+      const rankOf = (key) =>
+        key === CLUB_CONFIG.unofficialMatchLabel ? 2 : (key === followed ? 0 : 1);
+      const ordered = Object.entries(gradeMap).sort(([a], [b]) => rankOf(a) - rankOf(b));
 
       cards = ordered.map(([gradeName, evs]) => {
         if (gradeName === '__ungrouped__') {
@@ -4501,7 +4504,7 @@ function buildEvents() {
         // section rather than competing with Import fixture at the top.
         const isUnofficial = gradeName === CLUB_CONFIG.unofficialMatchLabel;
         const scheduleBtn = (isAdmin && isUnofficial && filter === 'upcoming') ? `
-          <button class="btn-secondary" style="margin-top:8px;display:flex;align-items:center;justify-content:center;gap:8px;"
+          <button class="btn-primary" style="margin-top:8px;display:flex;align-items:center;justify-content:center;gap:8px;"
             onclick="event.stopPropagation();openScheduleMatch()">
             <span>${icons.plus}</span> Schedule match
           </button>` : '';
