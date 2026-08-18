@@ -8873,14 +8873,13 @@ window.saveUserDetail = (id) => {
 
   // Tell people when their access changes — in both directions. Silently
   // removing someone's admin is worse than silently granting it.
-  const restartNote = ' Close and reopen the app to see the change.';
   if (!wasAdmin && nowAdmin) {
     sendPushNotificationToUsers('You are now an App Administrator',
-      `${CLUB_CONFIG.clubName} has given you full access to manage the app.${restartNote}`,
+      `${CLUB_CONFIG.clubName} has given you full access to manage the app.`,
       `${CLUB_CONFIG.appUrl}/`, [id]);
   } else if (wasAdmin && !nowAdmin) {
     sendPushNotificationToUsers('Your app access has changed',
-      `You are no longer an App Administrator. You are now: ${roleLabel(u)}.${restartNote}`,
+      `You are no longer an App Administrator. You are now: ${roleLabel(u)}.`,
       `${CLUB_CONFIG.appUrl}/`, [id]);
   }
   // Someone who asked for a role at sign-up gets told it came through. This
@@ -8889,16 +8888,16 @@ window.saveUserDetail = (id) => {
   if (approved.length) {
     const names = approved.map(r => ROLE_LABELS[r] || r).join(', ');
     sendPushNotificationToUsers('Request approved',
-      `You have been added as ${names}.${restartNote}`,
+      `You have been added as ${names}.`,
       `${CLUB_CONFIG.appUrl}/`, [id]);
   }
   if (!wasCommittee && nowCommittee && !approved.includes('committee')) {
     sendPushNotificationToUsers('You have been added to the Committee',
-      `You will now receive committee notices from ${CLUB_CONFIG.clubName}.${restartNote}`,
+      `You will now receive committee notices from ${CLUB_CONFIG.clubName}.`,
       `${CLUB_CONFIG.appUrl}/`, [id]);
   } else if (wasCommittee && !nowCommittee) {
     sendPushNotificationToUsers('Your club roles have changed',
-      `You have been removed from the Committee. You are now: ${roleLabel(u)}.${restartNote}`,
+      `You have been removed from the Committee. You are now: ${roleLabel(u)}.`,
       `${CLUB_CONFIG.appUrl}/`, [id]);
   }
 
@@ -9783,14 +9782,52 @@ async function sendPushNotificationToUsers(title, message, url, userIds) {
 // about every Players-only training. An admin who should hear about it is in
 // the audience like anybody else.
 function audienceForEvent(ev) {
-  const groups = Array.isArray(ev.audienceGroups) ? ev.audienceGroups : ['all'];
-  const direct = Array.isArray(ev.audienceUsers) ? ev.audienceUsers : [];
-  const members = state.users.filter(u => u.onboardingComplete);
   // Matches are club-wide by rule, so they never carry a meaningful audience.
-  if (ev.type === 'match' || groups.includes('all')) return members.map(u => u.id);
-  return members
-    .filter(u => direct.includes(u.id) || (u.memberRoles || []).some(r => groups.includes(r)))
-    .map(u => u.id);
+  if (ev.type === 'match') return state.users.filter(u => u.onboardingComplete).map(u => u.id);
+  return resolveAudience(ev.audienceGroups, ev.audienceUsers);
+}
+
+// Roles were previously read once, at login. A promotion or demotion then only
+// took effect when the member happened to restart the app — which meant a
+// demoted admin kept every power until they chose to cooperate, exactly
+// backwards for the case that matters most. Refreshed on the normal poll and
+// immediately on resume.
+async function refreshOwnProfile() {
+  if (!state.user || !sb._token) return;
+  try {
+    const rows = await sb.select('profiles', `id=eq.${state.user.id}`);
+    if (!Array.isArray(rows) || !rows[0]) return;
+    const fresh = profileToUser(rows[0]);
+    const before = JSON.stringify([state.user.memberRoles, state.user.pendingRoles, state.user.isAppAdmin]);
+    const after  = JSON.stringify([fresh.memberRoles, fresh.pendingRoles, fresh.isAppAdmin]);
+    if (before === after) return;
+
+    // Assigned field by field rather than wholesale, so an in-flight avatar
+    // upload or unsaved nickname isn't clobbered by a background poll.
+    state.user.memberRoles  = fresh.memberRoles;
+    state.user.pendingRoles = fresh.pendingRoles;
+    state.user.isAppAdmin   = fresh.isAppAdmin;
+    state.user.role         = fresh.role;
+    const mirror = state.users.find(u => u.id === state.user.id);
+    if (mirror) Object.assign(mirror, {
+      memberRoles: fresh.memberRoles, pendingRoles: fresh.pendingRoles,
+      isAppAdmin: fresh.isAppAdmin, role: fresh.role,
+    });
+
+    // Access may have just been taken away while an admin-only screen is
+    // open. Leaving them sitting on it would be confusing and its actions
+    // would now fail at the database anyway.
+    const adminOnly = ['userlist','userdetail','adminsquare','createannouncement','createevent','trainingschedule','teamselect'];
+    if (!isAppAdmin() && adminOnly.includes(state.screen)) {
+      state.activeTab = 'home';
+      navigate('home');
+    } else {
+      render(true);
+    }
+    showToast('Your club roles have been updated.');
+  } catch (e) {
+    console.log('Profile refresh error:', e);
+  }
 }
 
 // ── REAL-TIME MESSAGE POLLING ─────────────────────────────────────────────
@@ -9801,6 +9838,7 @@ let _lastAnnPoll = 0;
 let _lastInstagramPoll = 0;
 let _lastFacebookPoll = 0;
 let _lastReminderCheck = 0;
+let _lastProfilePoll = 0;
 // Tracks which reminder keys have already fired this session: Set of strings like `${eventId}_oneDayBefore`
 const _firedReminders = new Set();
 // Messages poll watermark — see pollMessages(). null until the first full
@@ -9834,6 +9872,15 @@ async function pollAll() {
   if (!state.user || !sb._token) return;
 
   const now = Date.now();
+
+  // ── Own roles every 60s ───────────────────────────────────────────────
+  // One row, so it's cheap; 60s is fast enough that a demotion can't be
+  // outrun, and _lastProfilePoll is reset on resume so returning to the app
+  // picks it up immediately rather than waiting out the interval.
+  if (now - _lastProfilePoll > 60000) {
+    _lastProfilePoll = now;
+    await refreshOwnProfile();
+  }
 
   // ── Poll events every 10s ─────────────────────────────────────────────
   if (now - _lastEventPoll > 10000) {
@@ -10399,6 +10446,10 @@ document.addEventListener('focusin', (e) => {
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
     if (window.location.hash) handleDeepLink();
+    // Force the roles check on resume rather than waiting out its interval —
+    // this is the moment someone opens the app after tapping a "you are now
+    // an administrator" (or no longer are) notification.
+    _lastProfilePoll = 0;
     if (state.user) pollAll();
   }
 });
