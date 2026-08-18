@@ -124,6 +124,48 @@
 
   .screen-scroll::-webkit-scrollbar { display: none; }
 
+  /* ── MATCH CRESTS ── */
+  .match-crests {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: var(--surface);
+    border-radius: 16px;
+    padding: 16px 14px;
+  }
+  .crest-side {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    text-align: center;
+  }
+  .crest-img {
+    width: 56px;
+    height: 56px;
+    object-fit: contain;
+    border-radius: 50%;
+    background: #fff;
+    padding: 3px;
+  }
+  /* Placeholder keeps both sides aligned when a club has no crest on PlayHQ */
+  .crest-fallback {
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    background: var(--surface2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text-dim);
+  }
+  .crest-name { font-size: 13px; font-weight: 600; color: var(--text); line-height: 1.3; }
+  .crest-vs { font-size: 12px; font-weight: 700; color: var(--text-dim); letter-spacing: 1px; flex-shrink: 0; }
+
   /* ── TOP BANNER ── */
   .top-banner {
     background: var(--bg);
@@ -2094,6 +2136,8 @@ function rowToEvent(r) {
     fromSchedule: r.from_schedule || false,
     reminder: Array.isArray(r.reminder) ? r.reminder : [],
     playHQId: r.play_hq_id || null,
+    homeLogo: r.home_logo || null,
+    awayLogo: r.away_logo || null,
     notifications: r.notifications || {},
     rsvp: {},   // populated separately
     rsvpGuests: {}, // populated separately — user_id -> guest_count for paid ticket purchases
@@ -2127,6 +2171,8 @@ function eventToRow(ev) {
     from_schedule: ev.fromSchedule || false,
     reminder: Array.isArray(ev.reminder) ? ev.reminder : [],
     play_hq_id: ev.playHQId || null,
+    home_logo: ev.homeLogo || null,
+    away_logo: ev.awayLogo || null,
     notifications: ev.notifications || {},
   };
 }
@@ -4572,6 +4618,27 @@ function buildEvents() {
 }
 
 // ── EVENT DETAIL ──────────────────────────────────────────────────────────
+// Head-to-head crests for a match, the way PlayHQ presents a fixture. Only
+// imported fixtures carry crests (PlayHQ is the source), and a club without
+// one on PlayHQ falls back to its initial so both sides stay aligned.
+function buildMatchCrests(ev) {
+  if (ev.type !== 'match' || !ev.homeTeam || !ev.awayTeam) return '';
+  if (!ev.homeLogo && !ev.awayLogo) return '';
+  const side = (name, logo) => `
+    <div class="crest-side">
+      ${logo
+        ? `<img class="crest-img" src="${logo}" alt="" loading="lazy"
+             onerror="this.outerHTML='<div class=\'crest-fallback\'>${(name || '?').trim().charAt(0).toUpperCase()}</div>'"/>`
+        : `<div class="crest-fallback">${(name || '?').trim().charAt(0).toUpperCase()}</div>`}
+      <div class="crest-name">${shortMatchTeam(name)}</div>
+    </div>`;
+  return `<div class="match-crests">
+    ${side(ev.homeTeam, ev.homeLogo)}
+    <div class="crest-vs">VS</div>
+    ${side(ev.awayTeam, ev.awayLogo)}
+  </div>`;
+}
+
 function buildEventDetail() {
   const ev = state.events.find(e => e.id === state.activeEventId);
   if (!ev) return `<div class="screen">${buildTopBanner({ title: 'Event', showBack: true })}<div class="empty-state" style="margin:20px;">Event not found</div></div>`;
@@ -4651,6 +4718,7 @@ function buildEventDetail() {
           ${isAdmin ? `<button class="btn-secondary" style="width:auto;padding:6px 16px;font-size:13px;" onclick="openEditEvent('${ev.id}')">Edit Event</button>` : ''}
           ${isAdmin ? `<button class="btn-secondary" style="width:auto;padding:6px 16px;font-size:13px;color:#ff4444;border-color:#ff4444;" onclick="confirmDeleteEvent('${ev.id}')">Delete</button>` : ''}
         </div>
+        ${buildMatchCrests(ev)}
         <div class="event-detail-title">${ev.title}</div>
         <div style="display:flex;flex-direction:column;gap:8px;">
           <div class="event-detail-meta">${icons.clock} ${formatDate(ev.date)} at ${formatTime(ev.time)}</div>
@@ -8744,7 +8812,8 @@ function deriveMatchTypes(fixtures, gradeCalendar) {
 function mapPHQGame(g, comp) {
   const comps = Array.isArray(g.competitors) ? g.competitors : [];
   const homeComp = comps.find(c => c.isHomeTeam);
-  const away = comps.find(c => !c.isHomeTeam)?.name;
+  const awayComp = comps.find(c => !c.isHomeTeam);
+  const away = awayComp?.name;
   const roundMatch = String(g.round?.name || g.round?.abbreviatedName || '').match(/\d+/);
   return {
     id: g.id,
@@ -8752,6 +8821,7 @@ function mapPHQGame(g, comp) {
     round: roundMatch ? Number(roundMatch[0]) : null,
     homeTeam: homeComp?.name || 'TBC',
     homeTeamId: homeComp?.id || null,
+    awayTeamId: awayComp?.id || null,
     awayTeam: away || 'TBC',
     date: g.schedule?.date || '',
     time: (g.schedule?.time || '').slice(0,5),
@@ -8800,6 +8870,10 @@ window.importLoadAll = async () => {
             gradeCalendars.set(gradeId, null);
           }
         }
+        fixtures.forEach(f => {
+          f.homeLogo = seasonLogos[f.homeTeamId] || null;
+          f.awayLogo = seasonLogos[f.awayTeamId] || null;
+        });
         deriveMatchTypes(fixtures, gradeId ? gradeCalendars.get(gradeId) : null);
         fixtures.forEach(f => seenGameIds.add(f.id));
         if (fixtures.length) {
@@ -8861,6 +8935,8 @@ window.importConfirm = async () => {
         home_team: fix.homeTeam,
         away_team: fix.awayTeam,
         home_away: clubTeamIds.has(fix.homeTeamId) ? 'Home' : 'Away',
+        home_logo: fix.homeLogo || null,
+        away_logo: fix.awayLogo || null,
         from_schedule: true,
       };
     });
