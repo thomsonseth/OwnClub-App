@@ -2122,11 +2122,32 @@ function profileToUser(p) {
     nickname: p.nickname || '',
     mobile: p.mobile || '',
     role: p.role || 'Player',
+    memberRoles: Array.isArray(p.member_roles) ? p.member_roles : [],
+    pendingRoles: Array.isArray(p.pending_roles) ? p.pending_roles : [],
+    isAppAdmin: p.is_app_admin === true,
     avatar: p.avatar_url || null,
     onboardingComplete: p.onboarding_complete === true,
     notifyNewMembers: p.notify_new_members !== false,
     followedTeam: p.followed_team || null,
   };
+}
+
+// ── Permissions ───────────────────────────────────────────────────────────
+// App powers come from is_app_admin (a permission) and member_roles (identity
+// tags) — never from the old single `role` string, which is still written
+// alongside them until every read path is migrated. See migrations/009.
+//
+// The split exists so that holding a position at the club (committee, coach,
+// captain) confers audience membership without conferring the ability to
+// operate the app. Only is_app_admin does that.
+function isAppAdmin(u = state.user) {
+  return u?.isAppAdmin === true;
+}
+
+// Coaches and captains may pick teams and run training — nothing else. They
+// cannot publish announcements, edit profiles, or create socials.
+function canManageCricket(u = state.user) {
+  return isAppAdmin(u) || (u?.memberRoles || []).some(r => r === 'coach' || r === 'captain');
 }
 
 // ── Map Supabase event row → app event object ─────────────────────────────
@@ -2159,6 +2180,11 @@ function rowToEvent(r) {
     homeLogo: r.home_logo || null,
     awayLogo: r.away_logo || null,
     notifications: r.notifications || {},
+    createdBy: r.created_by || null,
+    // Default to club-wide when absent so an event that predates migration 009
+    // (or a row fetched without these columns) is never accidentally narrowed.
+    audienceGroups: Array.isArray(r.audience_groups) ? r.audience_groups : ['all'],
+    audienceUsers: Array.isArray(r.audience_users) ? r.audience_users : [],
     rsvp: {},   // populated separately
     rsvpGuests: {}, // populated separately — user_id -> guest_count for paid ticket purchases
     team: [],   // populated separately
@@ -2194,6 +2220,13 @@ function eventToRow(ev) {
     home_logo: ev.homeLogo || null,
     away_logo: ev.awayLogo || null,
     notifications: ev.notifications || {},
+    // Round-trips through rowToEvent so an edit doesn't blank the author.
+    // Null on everything created before migration 009 — which is why only
+    // admins can delete pre-existing training, not coaches.
+    created_by: ev.createdBy || null,
+    audience_groups: Array.isArray(ev.audienceGroups) && ev.audienceGroups.length
+      ? ev.audienceGroups : ['all'],
+    audience_users: Array.isArray(ev.audienceUsers) ? ev.audienceUsers : [],
   };
 }
 
@@ -2707,6 +2740,10 @@ async function handleJoin() {
 
   state.user.nickname = nickname || state.user.firstName;
   state.user.role = finalRole;
+  // New model: a fresh member is exactly one of these. Positional tags
+  // (coach/captain/committee) are admin-granted and never self-selected.
+  state.user.memberRoles = [finalRole === 'Player' ? 'player' : 'supporter'];
+  state.user.isAppAdmin = false;
   state.user.onboardingComplete = true;
   if (avatarPreview) state.user.avatar = avatarPreview;
   state.joinForm.avatarPreview = null;
@@ -2716,7 +2753,9 @@ async function handleJoin() {
   try {
     await sb.update('profiles', {
       nickname: state.user.nickname,
-      role: state.user.role,
+      role: state.user.role,          // dual-written until every read path is migrated
+      member_roles: state.user.memberRoles,
+      is_app_admin: false,
       avatar_url: state.user.avatar || null,
       onboarding_complete: true,
     }, { id: state.user.id });
@@ -2730,7 +2769,7 @@ async function handleJoin() {
   // Notify Admins who have opted in — excludes the joiner themself even if
   // they happen to hold the Administrator role (e.g. Seth's own test signups).
   const adminIds = state.users
-    .filter(a => a.role === 'Administrator' && a.notifyNewMembers !== false && a.id !== state.user.id)
+    .filter(a => isAppAdmin(a) && a.notifyNewMembers !== false && a.id !== state.user.id)
     .map(a => a.id);
   if (adminIds.length) {
     sendPushNotificationToUsers(
@@ -3346,6 +3385,7 @@ async function handleCreateEvent() {
       cost: f.hasCost ? parseFloat(f.cost) || 0 : 0,
       image: eventImage,
       notifications: { ...f.notifications },
+      createdBy: state.user?.id || null,
       rsvp: {},
       rsvpGuests: {},
       team: [],
@@ -4141,7 +4181,7 @@ function buildJoinClub() {
 function buildHome() {
   const u = state.user;
   const displayName = u.nickname || u.firstName;
-  const isAdmin = u.role === 'Administrator' || u.role === 'Captain';
+  const isAdmin = isAppAdmin(u);
   // Same source as sliderNav()/sliderGo() so paging bounds always match.
   const upcomingMatches = homeSliderItems('match');
   const upcomingSocials = homeSliderItems('social');
@@ -4333,7 +4373,7 @@ function buildHome() {
 
 // ── ANNOUNCEMENTS LIST ────────────────────────────────────────────────────
 function buildAnnouncements() {
-  const isAdmin = state.user?.role === 'Administrator' || state.user?.role === 'Captain';
+  const isAdmin = isAppAdmin(); // announcements are admin-only — not coach/captain
   const cards = state.announcements.map(a => `
     <div class="announcement-card" onclick="openAnnouncement('${a.id}')" style="cursor:pointer;">
       ${a.image ? `<div style="width:100%;border-radius:12px;overflow:hidden;margin-bottom:10px;"><img src="${a.image}" style="width:100%;height:auto;display:block;"/></div>` : ''}
@@ -4359,7 +4399,7 @@ function buildAnnouncements() {
 function buildAnnouncementDetail() {
   const a = state.announcements.find(x => x.id === state.activeAnnouncementId);
   if (!a) return `<div class="screen">${buildTopBanner({ title: 'Announcement', showBack: true, onBack: "goHome()" })}<div class="empty-state" style="margin:20px;">Not found</div></div>`;
-  const isAdmin = state.user?.role === 'Administrator' || state.user?.role === 'Captain';
+  const isAdmin = isAppAdmin(); // announcements are admin-only — not coach/captain
   return `<div class="screen">
     ${buildTopBanner({ title: 'Announcement', showBack: true })}
     <div class="screen-scroll">
@@ -4520,7 +4560,7 @@ function buildEventCard(ev, isAdmin) {
 // ── EVENTS ────────────────────────────────────────────────────────────────
 function buildEvents() {
   const { eventsTab: tab, eventsFilter: filter } = state;
-  const isAdmin = state.user?.role === 'Administrator' || state.user?.role === 'Captain';
+  const isAdmin = canManageCricket(); // coaches/captains run training too
   const filtered = state.events.filter(e => {
     const typeMatch = (tab === 'social' && e.type === 'social') || (tab === 'matches' && e.type === 'match') || (tab === 'training' && e.type === 'training');
     const timeMatch = filter === 'upcoming' ? isUpcoming(e.date) : !isUpcoming(e.date);
@@ -4678,7 +4718,7 @@ function buildMatchCrests(ev) {
 function buildEventDetail() {
   const ev = state.events.find(e => e.id === state.activeEventId);
   if (!ev) return `<div class="screen">${buildTopBanner({ title: 'Event', showBack: true })}<div class="empty-state" style="margin:20px;">Event not found</div></div>`;
-  const isAdmin = state.user?.role === 'Administrator' || state.user?.role === 'Captain';
+  const isAdmin = canManageCricket(); // coaches/captains pick teams and run training
   const myRsvp = ev.rsvp?.[state.user?.id];
 
   const myGuestCount = ev.rsvpGuests?.[state.user?.id] || 0;
@@ -5665,7 +5705,11 @@ window.renderTeamSlotSuggestions = (idx) => {
     return;
   }
   const q = slot.query.trim().toLowerCase();
-  const players = state.users.filter(u => u.role === 'Player' || u.role === 'Captain' || u.role === 'Administrator');
+  // Every member is selectable. Someone who picked "supporter" at signup but
+  // turns up to play (or whose situation changed) shouldn't be unselectable
+  // because of a box they ticked once — and matches are visible to everyone,
+  // so there's no one who can be picked for a game they can't see.
+  const players = state.users;
   const usedIds = new Set(state.teamSlots.filter((s, i) => i !== idx && s.userId).map(s => s.userId));
   const matches = players.filter(p => !usedIds.has(p.id) && (!q || `${p.firstName} ${p.lastName}`.toLowerCase().includes(q)));
   // Pinned hint (not a suggestion, not clickable) so it's clear typing a
@@ -6111,7 +6155,7 @@ function buildNewConversation() {
 
 // ── MENU ──────────────────────────────────────────────────────────────────
 function buildMenu() {
-  const isAdmin = state.user?.role === 'Administrator';
+  const isAdmin = isAppAdmin();
   const items = [
     { icon: icons.person,    label: 'Profile',      screen: 'profile' },
     { icon: icons.info,      label: 'Club Info',    screen: 'clubinfo' },
@@ -6296,7 +6340,7 @@ function buildShop() {
 function buildSettings() {
   const t = state.toggles;
   const f = state.feedbackForm;
-  const isAdmin = state.user?.role === 'Administrator';
+  const isAdmin = isAppAdmin();
   return `<div class="screen">
     ${buildTopBanner({ title: 'Settings', showBack: true })}
     <div class="screen-scroll">
@@ -8390,9 +8434,18 @@ window.saveUserDetail = (id) => {
   if (!ln) { state.error = 'Last name is required.'; render(); return; }
 
   state.error = '';
+  // Only is_app_admin is derived from the old dropdown — it maps 1:1 onto
+  // 'Administrator'. member_roles is deliberately left alone: the four old
+  // values can't express a playing admin or a positional tag, so deriving
+  // tags from them here would silently demote Seth/Harry to supporter (and
+  // wipe any coach/captain/committee tag) every time someone's name is edited.
+  // Tag editing gets its own control alongside the approval queue.
+  const isAdminRole = role === 'Administrator';
   u.firstName = fn; u.lastName = ln; u.nickname = nick; u.mobile = mob; u.role = role;
+  u.isAppAdmin = isAdminRole;
   sb.update('profiles', {
     first_name: fn, last_name: ln, nickname: nick, mobile: mob, role,
+    is_app_admin: isAdminRole,
   }, { id });
   state.userDetailEditing = false;
   state.userDetailForm = {};
@@ -8578,6 +8631,7 @@ window.generateTrainingSchedule = () => {
     cancelled: false,
     from_schedule: true,
     reminder: s.reminder,
+    created_by: state.user?.id || null,
   })));
   state.error = '';
   // Navigate to Training tab in Events
@@ -9223,6 +9277,23 @@ async function sendPushNotificationToUsers(title, message, url, userIds) {
   }
 }
 
+// Who should be pushed about this event. Mirrors audienceFor() in
+// event-reminders-worker.js and the events RLS policy, with one deliberate
+// difference from RLS: admins are NOT auto-included. RLS lets an admin see
+// every event so they can moderate it — that's no reason to buzz their phone
+// about every Players-only training. An admin who should hear about it is in
+// the audience like anybody else.
+function audienceForEvent(ev) {
+  const groups = Array.isArray(ev.audienceGroups) ? ev.audienceGroups : ['all'];
+  const direct = Array.isArray(ev.audienceUsers) ? ev.audienceUsers : [];
+  const members = state.users.filter(u => u.onboardingComplete);
+  // Matches are club-wide by rule, so they never carry a meaningful audience.
+  if (ev.type === 'match' || groups.includes('all')) return members.map(u => u.id);
+  return members
+    .filter(u => direct.includes(u.id) || (u.memberRoles || []).some(r => groups.includes(r)))
+    .map(u => u.id);
+}
+
 // ── REAL-TIME MESSAGE POLLING ─────────────────────────────────────────────
 // Poll Supabase every 5 seconds for new messages while logged in
 let _pollInterval = null;
@@ -9274,7 +9345,7 @@ async function pollAll() {
       // open. The diff below never even reads .image for events we already
       // know about, so it was pure wasted bandwidth; genuinely new events
       // get their image fetched separately, once, just below.
-      const evRows = await sb.select('events', 'order=date.asc&select=id,type,title,date,time,finish_time,finish_date,location,description,cost,grade,grade_id,round,home_team,away_team,gender,format,home_away,cancelled,cancel_note,from_schedule,reminder,play_hq_id,notifications');
+      const evRows = await sb.select('events', 'order=date.asc&select=id,type,title,date,time,finish_time,finish_date,location,description,cost,grade,grade_id,round,home_team,away_team,gender,format,home_away,cancelled,cancel_note,from_schedule,reminder,play_hq_id,notifications,created_by,audience_groups,audience_users');
       if (Array.isArray(evRows)) {
         const existingIds = new Set(state.events.map(e => e.id));
         const newlyAddedIds = [];
@@ -9398,28 +9469,35 @@ async function pollAll() {
         const body = `${dateStr}${timeLabel}${locationLabel}`;
         const url = `${CLUB_CONFIG.appUrl}/#screen=eventdetail&id=${ev.id}`;
 
+        // Resolved per event. These used to call sendPushNotification(), which
+        // broadcasts to every onboarded member — that would push a restricted
+        // training to the whole club from whichever device happened to notice
+        // the window first, defeating the audience entirely.
+        const audience = audienceForEvent(ev);
+        if (!audience.length) continue;
+
         // 1 week before (168h window: between 169h and 167h out)
         if (notif.oneWeekBefore && hoursUntil <= 169 && hoursUntil >= 167) {
           if (await claimReminder(`${ev.id}_oneWeekBefore`)) {
-            sendPushNotification(`Reminder: ${label} in 1 week`, body, url);
+            sendPushNotificationToUsers(`Reminder: ${label} in 1 week`, body, url, audience);
           }
         }
         // 1 day before (24h window: between 25h and 23h out)
         if (notif.oneDayBefore && hoursUntil <= 25 && hoursUntil >= 23) {
           if (await claimReminder(`${ev.id}_oneDayBefore`)) {
-            sendPushNotification(`Tomorrow: ${label}`, body, url);
+            sendPushNotificationToUsers(`Tomorrow: ${label}`, body, url, audience);
           }
         }
         // Training schedule reminders — reminder is an array (older sessions may have a string)
         const trRem = Array.isArray(ev.reminder) ? ev.reminder : (ev.reminder ? [ev.reminder] : []);
         if (ev.fromSchedule && trRem.includes('dayBefore') && hoursUntil <= 25 && hoursUntil >= 23) {
           if (await claimReminder(`${ev.id}_trainingDayBefore`)) {
-            sendPushNotification(`Training tomorrow`, body, url);
+            sendPushNotificationToUsers(`Training tomorrow`, body, url, audience);
           }
         }
         if (ev.fromSchedule && trRem.includes('dayOf') && hoursUntil <= 5 && hoursUntil >= 3) {
           if (await claimReminder(`${ev.id}_trainingDayOf`)) {
-            sendPushNotification(`Training today`, body, url);
+            sendPushNotificationToUsers(`Training today`, body, url, audience);
           }
         }
       }
