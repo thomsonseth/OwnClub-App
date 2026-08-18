@@ -8854,7 +8854,11 @@ window.importLoadAll = async () => {
       const season = s.seasons.find(x => x.id === seasonId);
       const comp = season?.competition?.name || season?.association?.name || '';
       const isPast = String(season?.status || '').startsWith('COMPLETE');
-      const teams = (await playHQGet(`/teams?season=${encodeURIComponent(seasonId)}`)).data;
+      const teamsResp = await playHQGet(`/teams?season=${encodeURIComponent(seasonId)}`);
+      const teams = teamsResp.data;
+      // Crests for every team in the season — that's how an opponent gets one,
+      // since a game's competitors carry only id and name.
+      const seasonLogos = teamsResp.logos || {};
       for (const team of teams) {
         const games = (await playHQGet(`/fixture?team=${encodeURIComponent(team.id)}`)).data;
         const fixtures = games.map(g => mapPHQGame(g, comp)).filter(f => f.date && !seenGameIds.has(f.id));
