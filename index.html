@@ -1914,12 +1914,14 @@ const state = {
     title: '',
     body: '',
     image: null,
-    recipients: 'all',
+    audienceGroups: ['all'],
+    audienceUsers: [],
+    audienceExpanded: false,
     sendNotification: true,
   },
   createEventForm: {
     category: 'social', title: '', date: '', time: '', finishTime: '', finishDate: '', location: '',
-    description: '', hasCost: false, cost: '', recipients: 'all',
+    description: '', hasCost: false, cost: '', audienceGroups: ['all'], audienceUsers: [], audienceExpanded: false,
     opponent: '', gender: '', format: '', grade: '', homeAway: 'Home', // match-specific fields
     image: null,           // base64 uploaded image
     aiPrompt: '',          // AI image prompt
@@ -2174,6 +2176,107 @@ function hasPendingRoles(u) {
   return Array.isArray(u?.pendingRoles) && u.pendingRoles.length > 0;
 }
 
+// ── AUDIENCES ─────────────────────────────────────────────────────────────
+// Groups an announcement or event can be addressed to. Same tokens as
+// member_roles, which is what lets one array-overlap test answer "can this
+// person see it" both here and in the RLS policy.
+const AUDIENCE_GROUPS = [
+  { key: 'player',    label: 'Players' },
+  { key: 'supporter', label: 'Supporters' },
+  { key: 'coach',     label: 'Coaches' },
+  { key: 'captain',   label: 'Captains' },
+  { key: 'committee', label: 'Committee' },
+];
+
+// Is this person in the audience? Mirrors the RLS predicate, minus the
+// admins-see-everything clause — that exists for moderation, and is applied
+// separately where it belongs rather than being baked in here.
+function inAudience(u, groups, users) {
+  const g = Array.isArray(groups) && groups.length ? groups : ['all'];
+  if (g.includes('all')) return true;
+  if (Array.isArray(users) && users.includes(u?.id)) return true;
+  return (u?.memberRoles || []).some(r => g.includes(r));
+}
+
+// Everyone who should be pushed about this content. Admins are NOT added
+// automatically — see the note on audienceForEvent().
+function resolveAudience(groups, users) {
+  return state.users.filter(u => u.onboardingComplete && inAudience(u, groups, users)).map(u => u.id);
+}
+
+function audienceSummary(groups, users) {
+  const g = Array.isArray(groups) && groups.length ? groups : ['all'];
+  if (g.includes('all')) return 'Everyone in the club';
+  const names = AUDIENCE_GROUPS.filter(x => g.includes(x.key)).map(x => x.label);
+  const extra = (users || []).length;
+  if (extra) names.push(`${extra} specific ${extra === 1 ? 'person' : 'people'}`);
+  return names.length ? names.join(', ') : 'Nobody yet — pick at least one';
+}
+
+// Shared by the announcement and event forms. Handler names are passed as
+// strings because these render into onclick attributes.
+function buildAudiencePicker(groups, users, toggleGroupFn, toggleUserFn, expandFn, expanded) {
+  const g = Array.isArray(groups) && groups.length ? groups : ['all'];
+  const all = g.includes('all');
+  const chosen = users || [];
+  const box = (on, label, note, onclick) => `
+    <div class="notif-option" onclick="${onclick}">
+      <div class="notif-checkbox ${on ? 'checked' : ''}">
+        ${on ? `<svg viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="3" width="13" height="13"><polyline points="20 6 9 17 4 12"/></svg>` : ''}
+      </div>
+      <div><div class="notif-label">${label}</div>${note ? `<div style="font-size:12px;color:var(--text-muted);margin-top:2px;">${note}</div>` : ''}</div>
+    </div>`;
+
+  return `
+    ${box(all, 'Everyone in the club', '', `${toggleGroupFn}('all')`)}
+    ${all ? '' : `
+      <div style="margin-left:8px;border-left:2px solid var(--border);padding-left:10px;">
+        ${AUDIENCE_GROUPS.map(x => box(g.includes(x.key), x.label, '', `${toggleGroupFn}('${x.key}')`)).join('')}
+        <div style="font-size:13px;font-weight:600;color:var(--text-muted);margin:10px 0 4px;cursor:pointer;" onclick="${expandFn}()">
+          ${expanded ? '▾' : '▸'} Also send to specific people${chosen.length ? ` (${chosen.length})` : ''}
+        </div>
+        ${expanded ? state.users.filter(u => u.onboardingComplete)
+            .map(u => box(chosen.includes(u.id), `${u.firstName} ${u.lastName}`, roleLabel(u), `${toggleUserFn}('${u.id}')`))
+            .join('') : ''}
+      </div>`}
+    <div style="font-size:12px;color:var(--text-muted);margin-top:8px;">
+      Goes to: <span style="color:var(--accent);font-weight:600;">${audienceSummary(g, chosen)}</span>
+    </div>`;
+}
+
+// Ticking a specific group clears 'all', and vice versa — they're alternatives,
+// not additive. Unticking the last group falls back to 'all' rather than
+// leaving an audience of nobody.
+// Client-side mirrors of the Phase 2 RLS read policies. These make the app
+// behave correctly the moment they deploy, ahead of the policies landing —
+// but they are convenience, not enforcement. The policies are what actually
+// stop someone reading a committee announcement straight off the API.
+//
+// Admins see everything so they can moderate it; the author always keeps
+// sight of their own.
+function canSeeContent(a) {
+  if (isAppAdmin()) return true;
+  if (a.authorId && a.authorId === state.user?.id) return true;
+  return inAudience(state.user, a.audienceGroups, a.audienceUsers);
+}
+
+function visibleAnnouncements() {
+  return state.announcements.filter(canSeeContent);
+}
+
+// Matches are club-wide by rule and never carry a meaningful audience.
+function visibleEvents(list = state.events) {
+  return list.filter(e => e.type === 'match' || canSeeContent(e));
+}
+
+function toggleAudienceGroup(current, key) {
+  const g = Array.isArray(current) && current.length ? current : ['all'];
+  if (key === 'all') return ['all'];
+  const without = g.filter(x => x !== 'all');
+  const next = without.includes(key) ? without.filter(x => x !== key) : [...without, key];
+  return next.length ? next : ['all'];
+}
+
 // ── Map Supabase event row → app event object ─────────────────────────────
 function rowToEvent(r) {
   return {
@@ -2323,7 +2426,9 @@ async function loadAppData(silent = false) {
         image: a.image_url || null,
         date: a.created_at ? a.created_at.slice(0,10) : '',
         author: a.author_id ? (a.author_name || 'Admin') : 'Deleted user',
-        recipients: a.recipients || 'all',
+        authorId: a.author_id || null,
+        audienceGroups: Array.isArray(a.audience_groups) ? a.audience_groups : ['all'],
+              audienceUsers: Array.isArray(a.audience_users) ? a.audience_users : [],
       })) : [];
 
     // Threads + messages — RLS ensures only participant threads are returned.
@@ -3129,7 +3234,7 @@ function forceBackTarget(screen) {
 // the index run past the end of the visible list.
 function homeSliderItems(prefix) {
   if (prefix !== 'match') {
-    return state.events
+    return visibleEvents()
       .filter(e => e.type === 'social' && isUpcoming(e.date))
       .sort((a,b) => a.date > b.date ? 1 : -1);
   }
@@ -3322,7 +3427,7 @@ function handleRSVP(eventId, status, currentStatus) {
 function blankCreateEventForm() {
   return {
     category: 'social', title: '', date: '', time: '', finishTime: '', finishDate: '', location: '',
-    description: '', hasCost: false, cost: '', recipients: 'all',
+    description: '', hasCost: false, cost: '', audienceGroups: ['all'], audienceUsers: [], audienceExpanded: false,
     opponent: '', gender: '', format: '', grade: '', homeAway: 'Home',
     image: null, aiPrompt: '', aiGenerating: false, aiImage: null,
     imageTab: 'upload',
@@ -3383,10 +3488,11 @@ async function handleCreateEvent() {
 
       // Send notification if immediate ticked
       if (f.notifications?.immediate) {
-        sendPushNotification(
+        sendPushNotificationToUsers(
           `Event Updated: ${ev.title}`,
           (ev.description || `${formatDate(ev.date)}${ev.time ? ' at ' + formatTime(ev.time) : ''}${ev.location ? ' · ' + ev.location : ''}`).substring(0, 200),
           `${CLUB_CONFIG.appUrl}/#screen=eventdetail&id=${ev.id}`,
+          audienceForEvent(ev),
         );
       }
     }
@@ -3424,6 +3530,9 @@ async function handleCreateEvent() {
       image: eventImage,
       notifications: { ...f.notifications },
       createdBy: state.user?.id || null,
+      // Matches carry no picker, so they always stay club-wide.
+      audienceGroups: f.category === 'match' ? ['all'] : (f.audienceGroups || ['all']),
+      audienceUsers: f.category === 'match' ? [] : (f.audienceUsers || []),
       rsvp: {},
       rsvpGuests: {},
       team: [],
@@ -3448,10 +3557,11 @@ async function handleCreateEvent() {
     });
 
     if (!isMatch && f.notifications?.immediate) {
-      sendPushNotification(
+      sendPushNotificationToUsers(
         `New Event: ${newEv.title}`,
         (newEv.description || `${formatDate(newEv.date)}${newEv.time ? ' at ' + formatTime(newEv.time) : ''}${newEv.location ? ' · ' + newEv.location : ''}`).substring(0, 200),
         `${CLUB_CONFIG.appUrl}/#screen=eventdetail&id=${newEv.id}`,
+        audienceForEvent(newEv),
       );
     }
 
@@ -4334,7 +4444,7 @@ function buildHome() {
   }
 
   // Announcement slider cards (up to 5, image-forward)
-  const annSlides = state.announcements.slice(0,5).map(a => `
+  const annSlides = visibleAnnouncements().slice(0,5).map(a => `
     <div class="ann-slide-card" onclick="openAnnouncement('${a.id}')">
       ${a.image
         ? `<img class="ann-slide-img" src="${a.image}" loading="lazy" onerror="this.style.display='none'"/>`
@@ -4434,7 +4544,7 @@ function buildHome() {
 // ── ANNOUNCEMENTS LIST ────────────────────────────────────────────────────
 function buildAnnouncements() {
   const isAdmin = isAppAdmin(); // announcements are admin-only — not coach/captain
-  const cards = state.announcements.map(a => `
+  const cards = visibleAnnouncements().map(a => `
     <div class="announcement-card" onclick="openAnnouncement('${a.id}')" style="cursor:pointer;">
       ${a.image ? `<div style="width:100%;border-radius:12px;overflow:hidden;margin-bottom:10px;"><img src="${a.image}" style="width:100%;height:auto;display:block;"/></div>` : ''}
       <div class="ann-title">${a.title}</div>
@@ -4536,12 +4646,8 @@ function buildCreateAnnouncement() {
 
         <div class="input-group">
           <label class="input-label">Send to</label>
-          <select onchange="saveAnnField('recipients', this.value)">
-            <option value="all"        ${f.recipients==='all'      ?'selected':''}>Entire club</option>
-            <option value="players"    ${f.recipients==='players'  ?'selected':''}>Players only</option>
-            <option value="supporters" ${f.recipients==='supporters'?'selected':''}>Supporters only</option>
-            <option value="admins"     ${f.recipients==='admins'   ?'selected':''}>Administrators only</option>
-          </select>
+          ${buildAudiencePicker(f.audienceGroups, f.audienceUsers,
+            'toggleAnnAudienceGroup', 'toggleAnnAudienceUser', 'toggleAnnAudienceExpand', f.audienceExpanded)}
         </div>
 
         <div class="notif-option" onclick="toggleAnnNotification()">
@@ -4621,7 +4727,7 @@ function buildEventCard(ev, isAdmin) {
 function buildEvents() {
   const { eventsTab: tab, eventsFilter: filter } = state;
   const isAdmin = canManageCricket(); // coaches/captains run training too
-  const filtered = state.events.filter(e => {
+  const filtered = visibleEvents().filter(e => {
     const typeMatch = (tab === 'social' && e.type === 'social') || (tab === 'matches' && e.type === 'match') || (tab === 'training' && e.type === 'training');
     const timeMatch = filter === 'upcoming' ? isUpcoming(e.date) : !isUpcoming(e.date);
     return typeMatch && timeMatch;
@@ -5427,11 +5533,8 @@ function buildCreateEvent() {
         ${isMatch ? '' : `
         <div class="input-group">
           <label class="input-label">Recipients</label>
-          <select id="ce-recv" onchange="saveCEField('recipients', this.value)">
-            <option value="all"     ${f.recipients==='all'    ?'selected':''}>Entire club</option>
-            <option value="players" ${f.recipients==='players'?'selected':''}>Players only</option>
-            <option value="admins"  ${f.recipients==='admins' ?'selected':''}>Administrators only</option>
-          </select>
+          ${buildAudiencePicker(f.audienceGroups, f.audienceUsers,
+            'toggleCEAudienceGroup', 'toggleCEAudienceUser', 'toggleCEAudienceExpand', f.audienceExpanded)}
         </div>`}
 
         ${isMatch ? '' : notifSection}
@@ -7371,6 +7474,44 @@ window.skipPhotoAndJoin = () => {
 
 window.setJoinRole = (role) => { state.joinForm.role = role; render(); };
 
+// Audience pickers — announcement form and event form keep separate state,
+// but share the toggle semantics.
+window.toggleAnnAudienceGroup = (key) => {
+  const f = state.createAnnouncementForm;
+  f.audienceGroups = toggleAudienceGroup(f.audienceGroups, key);
+  if (f.audienceGroups.includes('all')) f.audienceUsers = [];
+  render(true);
+};
+window.toggleAnnAudienceUser = (id) => {
+  const f = state.createAnnouncementForm;
+  const list = f.audienceUsers || [];
+  f.audienceUsers = list.includes(id) ? list.filter(x => x !== id) : [...list, id];
+  render(true);
+};
+window.toggleAnnAudienceExpand = () => {
+  const f = state.createAnnouncementForm;
+  f.audienceExpanded = !f.audienceExpanded;
+  render(true);
+};
+
+window.toggleCEAudienceGroup = (key) => {
+  const f = state.createEventForm;
+  f.audienceGroups = toggleAudienceGroup(f.audienceGroups, key);
+  if (f.audienceGroups.includes('all')) f.audienceUsers = [];
+  render(true);
+};
+window.toggleCEAudienceUser = (id) => {
+  const f = state.createEventForm;
+  const list = f.audienceUsers || [];
+  f.audienceUsers = list.includes(id) ? list.filter(x => x !== id) : [...list, id];
+  render(true);
+};
+window.toggleCEAudienceExpand = () => {
+  const f = state.createEventForm;
+  f.audienceExpanded = !f.audienceExpanded;
+  render(true);
+};
+
 window.toggleJoinRoleRequest = (key) => {
   const list = state.joinForm.requestedRoles || [];
   state.joinForm.requestedRoles = list.includes(key)
@@ -7715,7 +7856,9 @@ window.openEditEvent = (id) => {
     description: ev.description || '',
     hasCost:     ev.cost > 0,
     cost:        ev.cost > 0 ? String(ev.cost) : '',
-    recipients:  ev.recipients  || 'all',
+    audienceGroups: ev.audienceGroups || ['all'],
+    audienceUsers:  ev.audienceUsers  || [],
+    audienceExpanded: false,
     // Match-specific fields, preserved so editing a match (via the generic
     // Edit Event screen) doesn't clobber them on save.
     opponent:    ev.type === 'match' ? (ev.homeAway === 'Away' ? ev.homeTeam : ev.awayTeam) || '' : '',
@@ -8327,7 +8470,7 @@ window.openAnnouncement = (id) => {
 
 window.openCreateAnnouncement = () => {
   state.editingAnnouncementId = null;
-  state.createAnnouncementForm = { title: '', body: '', image: null, recipients: 'all', sendNotification: true };
+  state.createAnnouncementForm = { title: '', body: '', image: null, audienceGroups: ['all'], audienceUsers: [], audienceExpanded: false, sendNotification: true };
   state.error = '';
   navigate('createannouncement');
 };
@@ -8340,7 +8483,11 @@ window.editAnnouncement = (id) => {
     title: a.title,
     body: a.body,
     image: a.image || null,
-    recipients: 'all',
+    // Carries the existing audience through an edit rather than silently
+    // widening it back to the whole club.
+    audienceGroups: a.audienceGroups || ['all'],
+    audienceUsers: a.audienceUsers || [],
+    audienceExpanded: false,
     sendNotification: false,
   };
   navigate('createannouncement');
@@ -8381,7 +8528,7 @@ window.publishAnnouncement = async () => {
 
   const u = state.user;
   const reset = () => {
-    state.createAnnouncementForm = { title: '', body: '', image: null, recipients: 'all', sendNotification: true };
+    state.createAnnouncementForm = { title: '', body: '', image: null, audienceGroups: ['all'], audienceUsers: [], audienceExpanded: false, sendNotification: true };
     state.editingAnnouncementId = null;
     state.error = '';
   };
@@ -8407,12 +8554,16 @@ window.publishAnnouncement = async () => {
       title,
       body,
       image_url: annImage,
+      audience_groups: f.audienceGroups || ['all'],
+      audience_users: f.audienceUsers || [],
     }, { id: editId });
     if (f.sendNotification) {
-      sendPushNotification(
+      const audience = resolveAudience(f.audienceGroups, f.audienceUsers);
+      if (audience.length) sendPushNotificationToUsers(
         `Announcement updated: ${title}`,
         body.substring(0, 200),
         `${CLUB_CONFIG.appUrl}/#screen=announcements&id=${editId}`,
+        audience,
       );
     }
     reset();
@@ -8435,7 +8586,9 @@ window.publishAnnouncement = async () => {
       image: annImage,
       date: today,
       author: u.nickname || u.firstName,
-      recipients: f.recipients,
+      authorId: u.id,
+      audienceGroups: f.audienceGroups || ['all'],
+      audienceUsers: f.audienceUsers || [],
       notified: f.sendNotification,
     };
     state.announcements.unshift(newAnn);
@@ -8444,7 +8597,8 @@ window.publishAnnouncement = async () => {
       author_id: u.id,
       author_name: u.nickname || u.firstName,
       image_url: annImage,
-      recipients: f.recipients,
+      audience_groups: f.audienceGroups || ['all'],
+      audience_users: f.audienceUsers || [],
     }).then(rows => {
       const annId = Array.isArray(rows) && rows[0]?.id ? rows[0].id : null;
       if (annId) {
@@ -8452,11 +8606,18 @@ window.publishAnnouncement = async () => {
         if (local && local.id === newAnn.id) local.id = annId;
       }
       if (f.sendNotification) {
-        sendPushNotification(
-          `Announcement: ${title}`,
-          body.substring(0, 200),
-          annId ? `${CLUB_CONFIG.appUrl}/#screen=announcements&id=${annId}` : `${CLUB_CONFIG.appUrl}/#screen=announcements`,
-        );
+        // Resolved through the audience rather than broadcast — this used to
+        // call sendPushNotification(), which went to every onboarded member
+        // regardless of who the announcement was actually addressed to.
+        const audience = resolveAudience(f.audienceGroups, f.audienceUsers);
+        if (audience.length) {
+          sendPushNotificationToUsers(
+            `Announcement: ${title}`,
+            body.substring(0, 200),
+            annId ? `${CLUB_CONFIG.appUrl}/#screen=announcements&id=${annId}` : `${CLUB_CONFIG.appUrl}/#screen=announcements`,
+            audience,
+          );
+        }
       }
     });
     reset();
@@ -8938,10 +9099,11 @@ window.amendSession = (id) => {
   state.modal = null;
   sb.update('events', { time: ev.time, finish_time: ev.finishTime, location: ev.location }, { id });
   if (notify) {
-    sendPushNotification(
+    sendPushNotificationToUsers(
       `Training Updated: ${formatDate(ev.date)}`,
       `${ev.time}–${ev.finishTime} at ${ev.location}`,
       `${CLUB_CONFIG.appUrl}/#screen=eventdetail&id=${id}`,
+      audienceForEvent(ev),
     );
   }
   showToast(notify ? 'Session updated — members notified!' : 'Session updated!');
@@ -8958,10 +9120,11 @@ window.cancelSession = (id) => {
   state.modal = null;
   sb.update('events', { cancelled: true, cancel_note: note }, { id });
   if (notify) {
-    sendPushNotification(
+    sendPushNotificationToUsers(
       `Training Cancelled: ${formatDate(ev.date)}`,
       note || 'This training session has been cancelled.',
       `${CLUB_CONFIG.appUrl}/#screen=eventdetail&id=${id}`,
+      audienceForEvent(ev),
     );
   }
   showToast(notify ? 'Session cancelled — members notified!' : 'Session cancelled.');
@@ -9663,7 +9826,7 @@ async function pollAll() {
       // image_url excluded — same reasoning as the events poll above. Every
       // announcement we already know about keeps its cached image; only a
       // genuinely new announcement triggers the small follow-up fetch below.
-      const annRows = await sb.select('announcements', 'order=created_at.desc&select=id,title,body,author_id,author_name,recipients,created_at');
+      const annRows = await sb.select('announcements', 'order=created_at.desc&select=id,title,body,author_id,author_name,created_at,audience_groups,audience_users');
       if (Array.isArray(annRows)) {
         // Load persisted deleted IDs from localStorage
         let deletedIds = new Set();
@@ -9682,7 +9845,9 @@ async function pollAll() {
               image: prev ? prev.image : undefined, // filled in below if genuinely new
               date: a.created_at ? a.created_at.slice(0,10) : '',
               author: a.author_id ? (a.author_name || 'Admin') : 'Deleted user',
-              recipients: a.recipients || 'all',
+        authorId: a.author_id || null,
+              audienceGroups: Array.isArray(a.audience_groups) ? a.audience_groups : ['all'],
+              audienceUsers: Array.isArray(a.audience_users) ? a.audience_users : [],
             };
           });
         const changed = JSON.stringify(newList.map(a=>a.id)) !== JSON.stringify(state.announcements.map(a=>a.id));
